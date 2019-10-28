@@ -47,8 +47,8 @@
 -export([limit_depth/1]).
 
 -define(IS_LIST_TYPE(N),
-        N =:= list orelse
-        N =:= cons orelse
+        is_record(N, t_list) orelse
+        is_record(N, t_cons) orelse
         N =:= nil).
 
 -define(IS_NUMBER_TYPE(N),
@@ -347,8 +347,13 @@ subtract(#t_integer{elements={Min, Max}}, #t_integer{elements={N,N}}) ->
     end;
 subtract(number, #t_float{elements=any}) -> #t_integer{};
 subtract(number, #t_integer{elements=any}) -> #t_float{};
-subtract(list, cons) -> nil;
-subtract(list, nil) -> cons;
+subtract(#t_list{type=TypeA}=T, #t_cons{head=TypeB}) ->
+    case meet(TypeA, TypeB) of
+        TypeA -> nil;
+        _ -> T
+    end;
+subtract(#t_list{type=LT,proper=P}, nil) ->
+    #t_cons{head=LT,proper=P};
 
 subtract(#t_union{atom=Atom}=A, #t_atom{}=B)->
     shrink_union(A#t_union{atom=subtract(Atom, B)});
@@ -474,7 +479,16 @@ make_type_from_value(Value) ->
     mtfv_1(Value).
 
 mtfv_1([]) -> nil;
-mtfv_1([_|_]) -> cons;
+mtfv_1([Head|_]=L) ->
+    if
+        length(L) =:= 1 ->
+            #t_cons{head=mtfv_1(Head),proper=true};
+        length(L) > 1 ->
+            Types = [mtfv_1(E) || E <- L],
+            #t_cons{head=foldl(fun join/2, none, Types),proper=true};
+        true ->
+            #t_cons{head=mtfv_1(Head),proper=false}
+    end;
 mtfv_1(A) when is_atom(A) -> #t_atom{elements=[A]};
 mtfv_1(B) when is_binary(B) -> #t_bitstring{size_unit=8};
 mtfv_1(B) when is_bitstring(B) -> #t_bitstring{};
@@ -525,43 +539,53 @@ make_integer(Min, Max) when is_integer(Min), is_integer(Max), Min =< Max ->
 limit_depth(Type) ->
     limit_depth(Type, ?MAX_TYPE_DEPTH).
 
-limit_depth(#t_tuple{elements=Es0}=T, Depth) ->
-    if Depth =< 0 ->
-            #t_tuple{elements=#{}};
-       true ->
-            Es = limit_depth_elements(Es0, Depth - 1),
-            T#t_tuple{elements=Es}
-    end;
-limit_depth(#t_union{tuple_set=TupleSet}=U, Depth) ->
-    case TupleSet of
-        none ->
-            U;
-        #t_tuple{}=Tup ->
-            U#t_union{tuple_set=limit_depth(Tup, Depth)};
-        [_|_] ->
-            if Depth =< 0 ->
-                    %% Preserve the minimum size of the tuple.
-                    [{{MinSize,_},_}|_] = TupleSet,
-                    T = #t_tuple{exact=false,size=MinSize},
-
-                    %% We must take care to get rid of the union
-                    %% wrapper if the union does not hold any other
-                    %% types than tuples.
-                    shrink_union(U#t_union{tuple_set=T});
-               true ->
-                    U#t_union{tuple_set=limit_depth_tuple_set(TupleSet, Depth)}
-            end
-    end;
+limit_depth(#t_cons{}=T, Depth) ->
+    limit_depth_list(T, Depth);
+limit_depth(#t_list{}=T, Depth) ->
+    limit_depth_list(T, Depth);
+limit_depth(#t_tuple{}=T, Depth) ->
+    limit_depth_tuple(T, Depth);
+limit_depth(#t_union{list=List0,tuple_set=TupleSet0}=U, Depth) ->
+    TupleSet = limit_depth_tuple(TupleSet0, Depth),
+    List = limit_depth_list(List0, Depth),
+    shrink_union(U#t_union{list=List,tuple_set=TupleSet});
 limit_depth(Type, _Depth) ->
     Type.
 
-limit_depth_elements(Es, Depth) ->
-    maps:map(fun(_, E) -> limit_depth(E, Depth) end, Es).
+limit_depth_list(#t_cons{head=Head0}=T, Depth) ->
+    Head = if
+               Depth > 0 -> limit_depth(Head0, Depth - 1);
+               Depth =< 0 -> any
+           end,
+    T#t_cons{head=Head};
+limit_depth_list(#t_list{type=Type0}=T, Depth) ->
+    Type = if
+               Depth > 0 -> limit_depth(Type0, Depth - 1);
+               Depth =< 0 -> any
+           end,
+    T#t_list{type=Type};
+limit_depth_list(nil, _Depth) ->
+    nil;
+limit_depth_list(none, _Depth) ->
+    none.
 
-limit_depth_tuple_set([{SzTag,Tuple}|Ts], Depth) ->
-    [{SzTag,limit_depth(Tuple, Depth)}|limit_depth_tuple_set(Ts, Depth)];
-limit_depth_tuple_set([], _Depth) ->
-    [].
+limit_depth_tuple(#t_tuple{elements=Es0}=T, Depth) ->
+    if
+        Depth > 0 ->
+            Es = maps:map(fun(_, E) -> limit_depth(E, Depth - 1) end, Es0),
+            T#t_tuple{elements=Es};
+        Depth =< 0 ->
+            #t_tuple{elements=#{}}
+    end;
+limit_depth_tuple([{{MinSize,_},_}|_], Depth) when Depth =< 0 ->
+    %% Preserve the minimum size of the tuple set.
+    #t_tuple{exact=false,size=MinSize};
+limit_depth_tuple([{SzTag,Tuple}|Ts], Depth) ->
+    [{SzTag, limit_depth_tuple(Tuple, Depth)} | limit_depth_tuple(Ts, Depth)];
+limit_depth_tuple([], _Depth) ->
+    [];
+limit_depth_tuple(none, _Depth) ->
+    none.
 
 %%%
 %%% Helpers
@@ -628,6 +652,17 @@ glb(#t_bs_matchable{tail_unit=UnitA}, #t_bitstring{size_unit=UnitB}=T) ->
 glb(#t_bs_matchable{tail_unit=UnitA}, #t_bs_context{tail_unit=UnitB}=T) ->
     Unit = UnitA * UnitB div gcd(UnitA, UnitB),
     T#t_bs_context{tail_unit=Unit};
+glb(#t_cons{head=TypeA,proper=PropA}, #t_cons{head=TypeB,proper=PropB}) ->
+    %% Note the use of meet/2; elements don't need to be normal types.
+    case meet(TypeA, TypeB) of
+        none -> none;
+        Type -> #t_cons{head=Type,proper=(PropA or PropB)}
+    end;
+glb(#t_cons{head=TypeA,proper=PropA}, #t_list{type=TypeB,proper=PropB}) ->
+    case meet(TypeA, TypeB) of
+        none -> none;
+        Type -> #t_cons{head=Type,proper=(PropA or PropB)}
+    end;
 glb(#t_float{}=T, #t_float{elements=any}) ->
     T;
 glb(#t_float{elements=any}, #t_float{}=T) ->
@@ -650,14 +685,29 @@ glb(#t_integer{elements={MinA,MaxA}}, #t_integer{elements={MinB,MaxB}})
        MinB >= MinA, MinB =< MaxA ->
     true = MinA =< MaxA andalso MinB =< MaxB,   %Assertion.
     #t_integer{elements={max(MinA, MinB),min(MaxA, MaxB)}};
-glb(#t_integer{}=T, number) -> T;
-glb(#t_float{}=T, number) -> T;
-glb(number, #t_integer{}=T) -> T;
-glb(number, #t_float{}=T) -> T;
-glb(list, cons) -> cons;
-glb(list, nil) -> nil;
-glb(cons, list) -> cons;
-glb(nil, list) -> nil;
+glb(#t_integer{}=T, number) ->
+    T;
+glb(#t_float{}=T, number) ->
+    T;
+glb(#t_list{type=TypeA,proper=PropA}, #t_list{type=TypeB,proper=PropB}) ->
+    case meet(TypeA, TypeB) of
+        none ->
+            %% A list is a union of `[type() | _]` and `[]`, so we're left with
+            %% nil when the element types are incompatible.
+            nil;
+        T ->
+            #t_list{type=T,proper=(PropA or PropB)}
+    end;
+glb(#t_list{}=A, #t_cons{}=B) ->
+    glb(B, A);
+glb(#t_list{}, nil) ->
+    nil;
+glb(nil, #t_list{}) ->
+    nil;
+glb(number, #t_integer{}=T) ->
+    T;
+glb(number, #t_float{}=T) ->
+    T;
 glb(#t_tuple{}=T1, #t_tuple{}=T2) ->
     glb_tuples(T1, T2);
 glb(_, _) ->
@@ -754,29 +804,47 @@ lub(#t_bs_matchable{tail_unit=UnitA}, #t_bitstring{size_unit=UnitB}) ->
     lub_bs_matchable(UnitA, UnitB);
 lub(#t_bs_matchable{tail_unit=UnitA}, #t_bs_context{tail_unit=UnitB}) ->
     lub_bs_matchable(UnitA, UnitB);
+lub(#t_cons{head=TypeA,proper=PropA}, #t_cons{head=TypeB,proper=PropB}) ->
+    %% Note the use of join/2; elements don't need to be normal types.
+    #t_cons{head=join(TypeA,TypeB),proper=(PropA and PropB)};
+lub(#t_cons{head=TypeA,proper=PropA}, #t_list{type=TypeB,proper=PropB}) ->
+    #t_list{type=join(TypeA,TypeB),proper=(PropA and PropB)};
+lub(#t_cons{head=T,proper=P}, nil) ->
+    #t_list{type=T,proper=P};
 lub(#t_float{elements={MinA,MaxA}},
     #t_float{elements={MinB,MaxB}}) ->
     #t_float{elements={min(MinA,MinB),max(MaxA,MaxB)}};
 lub(#t_float{}, #t_float{}) ->
     #t_float{};
+lub(#t_float{}, #t_integer{}) ->
+    number;
+lub(#t_float{}, number) ->
+    number;
 lub(#t_fun{}, #t_fun{}) ->
     #t_fun{};
 lub(#t_integer{elements={MinA,MaxA}},
     #t_integer{elements={MinB,MaxB}}) ->
     #t_integer{elements={min(MinA,MinB),max(MaxA,MaxB)}};
-lub(#t_integer{}, #t_integer{}) -> #t_integer{};
-lub(list, cons) -> list;
-lub(cons, list) -> list;
-lub(nil, cons) -> list;
-lub(cons, nil) -> list;
-lub(nil, list) -> list;
-lub(list, nil) -> list;
-lub(#t_integer{}, #t_float{}) -> number;
-lub(#t_float{}, #t_integer{}) -> number;
-lub(#t_integer{}, number) -> number;
-lub(number, #t_integer{}) -> number;
-lub(#t_float{}, number) -> number;
-lub(number, #t_float{}) -> number;
+lub(#t_integer{}, #t_integer{}) ->
+    #t_integer{};
+lub(#t_integer{}, #t_float{}) ->
+    number;
+lub(#t_integer{}, number) ->
+    number;
+lub(#t_list{type=TypeA,proper=PropA}, #t_list{type=TypeB,proper=PropB}) ->
+    #t_list{type=join(TypeA,TypeB),proper=(PropA and PropB)};
+lub(#t_list{}=A, #t_cons{}=B) ->
+    lub(B, A);
+lub(nil=A, #t_cons{}=B) ->
+    lub(B, A);
+lub(nil, #t_list{}=T) ->
+    T;
+lub(#t_list{}=T, nil) ->
+    T;
+lub(number, #t_integer{}) ->
+    number;
+lub(number, #t_float{}) ->
+    number;
 lub(#t_tuple{size=Sz,exact=ExactA,elements=EsA},
     #t_tuple{size=Sz,exact=ExactB,elements=EsB}) ->
     Exact = ExactA and ExactB,
@@ -917,10 +985,16 @@ verified_normal_type(#t_integer{elements=any}=T) -> T;
 verified_normal_type(#t_integer{elements={Min,Max}}=T)
   when is_integer(Min), is_integer(Max), Min =< Max ->
     T;
-verified_normal_type(list=T) -> T;
+verified_normal_type(#t_list{type=ElementType,proper=Proper}=T) ->
+    true = is_boolean(Proper),                       %Assertion.
+    _ = verified_type(ElementType),
+    T;
 verified_normal_type(#t_map{}=T) -> T;
 verified_normal_type(nil=T) -> T;
-verified_normal_type(cons=T) -> T;
+verified_normal_type(#t_cons{head=ElementType,proper=Proper}=T) ->
+    true = is_boolean(Proper),                       %Assertion.
+    _ = verified_type(ElementType),
+    T;
 verified_normal_type(number=T) -> T;
 verified_normal_type(#t_tuple{size=Size,elements=Es}=T) ->
     %% All known elements must have a valid index and type (which may be a
