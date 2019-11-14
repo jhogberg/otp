@@ -58,7 +58,8 @@
 -record(t_bs_matchable, {tail_unit=1}).
 -record(t_cons, {head=any :: type(), proper=false :: boolean()}).
 -record(t_float, {elements=any :: 'any' | {float(),float()}}).
--record(t_fun, {arity=any :: arity() | 'any'}).
+-record(t_fun, {arity=any :: arity() | 'any',
+                type=any :: type() }).
 -record(t_integer, {elements=any :: 'any' | {integer(),integer()}}).
 -record(t_list, {type=any :: type(), proper=false :: boolean()}).
 -record(t_map, {}).
