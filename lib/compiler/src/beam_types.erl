@@ -377,7 +377,12 @@ subtract(#t_union{tuple_set=#t_tuple{}=Tuple}=A, #t_tuple{}=B) ->
 subtract(#t_union{other=Other}=A, B) ->
     shrink_union(A#t_union{other=subtract(Other, B)});
 
-subtract(T, _) -> T.
+subtract(A, B) ->
+    %% There's nothing left if A is strictly more specific than B.
+    case meet(A, B) of
+        A -> none;
+        _Other -> A
+    end.
 
 subtract_matchable(T, UnitA, UnitB) ->
     if
