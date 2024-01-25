@@ -4,4 +4,7 @@ crash_1.erl:48:31: The call crash_1:get_using_branch2(Branch::maybe_improper_lis
 crash_1.erl:50:1: The pattern <_Branch, []> can never match the type <maybe_improper_list(),crash_1:target()>
 crash_1.erl:52:1: The pattern <Branch, [H = {'target', _, _} | _T]> can never match the type <maybe_improper_list(),crash_1:target()>
 crash_1.erl:54:1: The pattern <Branch, [{'target', _, _} | T]> can never match the type <maybe_improper_list(),crash_1:target()>
-crash_2.erl:4:2: The specification for crash_2:crash/0 has an opaque subtype queue:queue(_) which is violated by the success typing () -> {tuple(),queue:queue(_)}
+crash_2.erl:4:2: Invalid type specification for function crash_2:crash/0.
+ The success typing is crash_2:crash() -> {tuple(),queue:queue(_)}
+ But the spec is crash_2:crash() -> {tuple(),integer()}
+ The return types do not overlap

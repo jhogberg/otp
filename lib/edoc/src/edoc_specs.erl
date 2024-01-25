@@ -667,6 +667,7 @@ analyze_type_attribute(Form) ->
 -spec is_tag(Tag :: tag_kind() | term()) -> boolean().
 
 is_tag(callback) -> true;
+is_tag(nominal) -> true;
 is_tag(opaque) -> true;
 is_tag(spec) -> true;
 is_tag(type) -> true;
@@ -678,6 +679,7 @@ is_tag(_) -> false.
 -spec tag(Tag :: atom()) -> tag_kind() | unknown.
 
 tag(callback) -> callback;
+tag(nominal) -> nominal;
 tag(opaque) -> type;
 tag(spec) -> spec;
 tag(type) -> type;

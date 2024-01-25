@@ -1,3 +1,5 @@
 
 opaque_digraph.erl:353:5: Cons will produce an improper list since its 2nd argument is number()
 opaque_digraph.erl:365:5: Cons will produce an improper list since its 2nd argument is number()
+opaque_erl_scan.erl:215:24: Guard test is_tuple(TokenInfo::opaque_erl_scan:token_info()) breaks the opacity of its argument
+opaque_erl_scan.erl:253:28: Guard test is_tuple(AttributeInfo::opaque_erl_scan:attribute_info()) breaks the opacity of its argument

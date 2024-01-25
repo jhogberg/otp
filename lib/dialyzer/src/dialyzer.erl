@@ -933,8 +933,8 @@ message_to_string({opaque_match, [Pat, OpaqueType, OpaqueTerm]}, I, _E) ->
 	    true -> t(OpaqueTerm, I)
 	 end,
   io_lib:format("The attempt to match a term of type ~ts against the ~ts"
-		" breaks the opacity of ~ts\n",
-                [t(OpaqueType, I), ps(Pat, I), Term]);
+		" breaks the opacity of the term\n",
+                [Term, ps(Pat, I)]);
 message_to_string({opaque_neq, [Type, _Op, OpaqueType]}, I, _E) ->
   io_lib:format("Attempt to test for inequality between a term of type ~ts"
 		" and a term of opaque type ~ts\n",

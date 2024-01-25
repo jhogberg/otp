@@ -176,7 +176,7 @@ get_record_and_type_info([{type, Location, [{{record, Name}, Fields0, []}]}
   get_record_and_type_info(Left, Module, NewRecDict, File);
 get_record_and_type_info([{Attr, Location, [{Name, TypeForm}]}|Left],
 			 Module, RecDict, File)
-               when Attr =:= 'type'; Attr =:= 'opaque' ->
+               when Attr =:= 'type'; Attr =:= 'opaque'; Attr =:= 'nominal' ->
   FN = {File, Location},
   try add_new_type(Attr, Name, TypeForm, [], Module, FN, RecDict) of
     NewRecDict ->
@@ -186,7 +186,7 @@ get_record_and_type_info([{Attr, Location, [{Name, TypeForm}]}|Left],
   end;
 get_record_and_type_info([{Attr, Location, [{Name, TypeForm, Args}]}|Left],
 			 Module, RecDict, File)
-               when Attr =:= 'type'; Attr =:= 'opaque' ->
+               when Attr =:= 'type'; Attr =:= 'opaque'; Attr =:= 'nominal' ->
   FN = {File, Location},
   try add_new_type(Attr, Name, TypeForm, Args, Module, FN, RecDict) of
     NewRecDict ->
@@ -329,11 +329,31 @@ process_record_remote_types_module(Module, CServer) ->
       dialyzer_codeserver:store_temp_records(Module,
                                              maps:from_list(RecordList),
                                              CServer),
+      %process_type(RecordList, Module, dialyzer_codeserver:get_exported_types_table(NewCodeServer), dialyzer_codeserver:get_temp_records_table(NewCodeServer), erl_types:var_table__new()),
     rcv_ext_types()
   catch
     throw:{error, _}=Error ->
       [Error] ++ rcv_ext_types()
   end.
+
+% process_type([{{Key, Value}, C2}|T], Module, ExpTypes, RecordTable, VarTable) -> 
+%   case Key of
+%     {_, Name, NArgs} -> 
+%       {{_Module, FileLocation, Form, _ArgNames}, _Type} = Value,
+%       {File, _Location} = FileLocation,
+%       Site = {type, {Module, Name, NArgs}, File},
+%       {T6, _} = erl_types:t_from_form(Form, ExpTypes, Site,
+%                           RecordTable, VarTable, C2),
+%       T7 = erl_types:subst_all_vars_to_any(T6),
+%       case erl_types:t_union_with_opaque(T7, [Module]) of
+%         true -> io:format("~p~n", [T7]),
+%         process_type(T, Module, ExpTypes, RecordTable, VarTable);
+%         false -> process_type(T, Module, ExpTypes, RecordTable, VarTable)
+%         end;
+%     {record, _Name} -> 
+%       ok
+%   end;
+% process_type([], _, _, _, _) -> ok.
 
 rcv_ext_types() ->
   Self = self(),
@@ -374,6 +394,8 @@ process_opaque_types(AllModules, CServer, TempExpTypes) ->
                                           RecordTable, VarTable, C2),
                   {{Key, {F, Type}}, C3};
                 {type, _Name, _NArgs} ->
+                  {{Key, Value}, C2};
+                {nominal, _Name, _NArgs} ->
                   {{Key, Value}, C2};
                 {record, _RecName} ->
                   {{Key, Value}, C2}
