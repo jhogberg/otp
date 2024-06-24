@@ -811,3 +811,13 @@ bif erts_internal:processes_next/1
 bif code:get_debug_info/1
 bif erlang:exit/3
 bif erlang:link/2
+
+#
+# STRUCT PROTOTYPE
+#
+
+bif struct_prototype:define/3
+bif struct_prototype:create/3
+bif struct_prototype:update/3
+bif struct_prototype:read/2
+bif struct_prototype:is/4
