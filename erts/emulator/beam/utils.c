@@ -1901,11 +1901,6 @@ tailrecur_ne:
                     if (diff != 0) {
                         RETURN_NEQ(diff);
                     }
-
-                    diff = (Sint)entry_a->arity - (Sint)entry_b->arity;
-                    if (diff != 0) {
-                        RETURN_NEQ(diff);
-                    }
                 }
 
                 /* compare the arities */

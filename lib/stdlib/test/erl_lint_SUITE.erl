@@ -91,7 +91,8 @@
          update_literal/1,
          messages_with_jaro_suggestions/1,
          illegal_zip_generator/1,
-         coverage/1]).
+         coverage/1,
+         structs/1]).
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
@@ -128,10 +129,14 @@ all() ->
      documentation_attributes,
      match_float_zero,
      undefined_module,
+<<<<<<< HEAD
      update_literal,
      messages_with_jaro_suggestions,
      illegal_zip_generator,
      coverage].
+=======
+     update_literal, structs].
+>>>>>>> 592b18e5f9 (struct frontend)
 
 groups() -> 
     [{unused_vars_warn, [],
@@ -5539,6 +5544,7 @@ update_literal(Config) ->
 
     ok.
 
+<<<<<<< HEAD
 %% For certain kinds of errors that are easily caused by typos, error 
 %% messages try to suggest fixes according to jaro_similarity.
 messages_with_jaro_suggestions(Config) ->
@@ -5694,6 +5700,75 @@ do_coverage() ->
                end
            end || File <- filelib:wildcard(Wc)],
     io:format("~p\n", [Res]),
+=======
+structs(Config) ->
+    Ts = [{undefined_struct,
+           <<"foo() -> &a{}.
+             bar(&b{}) -> b.">>,
+           [],
+           {errors,[{{1,30},erl_lint,{undefined_struct,a}},
+                   {{2,18},erl_lint,{undefined_struct,b}}],[]}},
+          {redefine_struct,
+           <<"-struct(a, {}).
+             -struct(a, {}).">>,
+           [],
+           {errors,[{{2,15},erl_lint,{redefine_struct,a}}],[]}},
+          {redefine_struct_1,
+           <<"-struct(a, {}).
+              -import_struct(a, [a]).">>,
+           [],
+           {errors,[{{2,16},erl_lint,{redefine_struct_import,a}}],[]}},
+          {redefine_struct_2,
+           <<"-import_struct(a, [a]).
+              -struct(a, {}).">>,
+           [],
+           {errors,[{{1,22},erl_lint,{redefine_struct_import,a}}],[]}},
+          {redefine_struct_3,
+           <<"-import_struct(a, [a]).
+              -import_struct(b, [a]).">>,
+          [],
+          {errors,[{{2,16},erl_lint,{redefine_struct_import,{a,a}}}],[]}},
+          % expressions
+          {redefine_struct_field_3,
+           <<"-import_struct(a, [a]).
+              mk_a() -> &a{a = 1, a = b}.
+              get_a(&a{b = b, b = c}) -> ok.">>,
+          [],
+          {errors,[{{2,35},erl_lint,{redefine_struct_field,a}},
+                   {{3,31},erl_lint,{redefine_struct_field,b}}],[]}},
+          {redefine_struct_field_def,
+           <<"-struct(s1, {a, a}).
+              -struct(s2, {a=atom, a}).
+              -struct(s3, {a, a=atom}).
+              -struct(s4, {a=atom, b}).">>,
+           [],
+           {errors,[{{1,37},erl_lint,{redefine_struct_field_def,s1,a}},
+                    {{2,36},erl_lint,{redefine_struct_field_def,s2,a}},
+                    {{3,31},erl_lint,{redefine_struct_field_def,s3,a}}], []}},
+           {undefined_struct_field,
+            <<"-struct(s, {a=a, c=c}).
+               mk() -> &s{a = a, b = b}.
+               pat(&s{a = A, b = B}) -> {A, B}.
+               update(S) -> S&s{b = b}.
+               get1(S) -> S&s.b.
+               get2(S, B) when B == S&s.b -> ok.">>,
+            [],
+            {warnings,[{{2,34},erl_lint,{undefined_struct_field,b,s}},
+                       {{3,30},erl_lint,{undefined_struct_field,b,s}},
+                       {{4,33},erl_lint,{undefined_struct_field,b,s}},
+                       {{5,28},erl_lint,{undefined_struct_field,b,s}},
+                       {{6,38},erl_lint,{undefined_struct_field,b,s}}]}},
+            {redefine_struct_field_3,
+             <<"-struct(s, {a, b, c = c}).
+                mk1() -> &s{}.
+                mk2() -> &s{a = a}.">>,
+            [],
+             {warnings,[{{2,26},erl_lint,{not_inited_struct_field,a,s}},
+                        {{2,26},erl_lint,{not_inited_struct_field,b,s}},
+                        {{3,26},erl_lint,{not_inited_struct_field,b,s}}]}}
+         ],
+    [] = run(Config, Ts),
+>>>>>>> 592b18e5f9 (struct frontend)
     ok.
 
 %%%
