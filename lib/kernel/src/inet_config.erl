@@ -429,7 +429,7 @@ read_inetrc() ->
     File = case application:get_env(inetrc) of
                {ok, Value} when is_list(Value) -> Value;
                {ok, Value} when is_atom(Value) -> atom_to_list(Value);
-               error -> os:getenv("ERL_INETRC")
+               undefined -> os:getenv("ERL_INETRC")
            end,
     case is_list(File) of
         true -> try_get_rc(File);
