@@ -61,7 +61,7 @@
                deprecated = #{}    :: map(),
 
                docformat = ?DEFAULT_FORMAT :: binary(),
-               moduledoc = {?DEFAULT_MODULE_DOC_LOC, none} :: {integer() | erl_anno:anno(), none | map() | hidden},
+               moduledoc = {erl_anno:new(?DEFAULT_MODULE_DOC_LOC), none} :: {erl_anno:anno(), none | map() | hidden},
                moduledoc_meta = none :: none | #{ _ := _ },
 
                behaviours = []     :: list(module()),

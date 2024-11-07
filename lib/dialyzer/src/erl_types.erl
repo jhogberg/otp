@@ -116,11 +116,13 @@
 	 t_is_none/1,
 	 t_is_none_or_unit/1,
 	 t_is_number/1,
-   t_is_opaque/1,
+         t_is_opaque/1,
+         t_is_opaque/2,
 	 t_is_pid/1,
 	 t_is_port/1,
 	 t_is_maybe_improper_list/1,
 	 t_is_reference/1,
+         t_is_same_opaque/2,
 	 t_is_singleton/1,
 	 t_is_string/1,
 	 t_is_subtype/2,
@@ -149,6 +151,7 @@
 	 t_nil/0,
 	 t_node/0,
          t_nominal/2,
+         t_nominal_module/1,
 	 t_none/0,
 	 t_nonempty_binary/0,
 	 t_nonempty_bitstring/0,
@@ -159,7 +162,6 @@
 	 t_number/1,
 	 t_number_vals/1,
          t_opacity_conflict/3,
-         t_union_with_opaque/2,
 	 t_pid/0,
 	 t_port/0,
 	 t_maybe_improper_list/0,
@@ -422,29 +424,47 @@ t_is_none(_) -> false.
 %% nominals of the `Required` type.
 -spec t_opacity_conflict(Given :: erl_type(),
                          Required :: erl_type(),
-                         Module :: module()) -> boolean().
+                         Module :: module()) ->
+    none | expected_opaque | expected_transparent.
 t_opacity_conflict(Given, Required, Module) ->
-  %% If the infimum of the Given and Required types is possible, we can detect
-  %% violations by checking whether the infimum becomes impossible with the
-  %% structural component of opaques replaced with ?opaque.
+  %% Opacity violations are detected by selectively blinding the infimum
+  %% routine to the structure of opaque types that we are not supposed to know
+  %% anything about.
   %%
-  %% Conversely, if the infimum is impossible, we can detect violations by
-  %% checking whether it becomes possible if the structural components are
-  %% replaced with ?any.
+  %% If the infimum of the `Given` and `Required` types is possible, we replace
+  %% the structural component of opaques with a magic value whose infimum with
+  %% anything else becomes `none()`, forcing a failure when the original
+  %% opaques introduce more information.
+  %%
+  %% Conversely, if the infimum of the `Given` and `Required` types is
+  %% impossible, we replace the structural component of opaques with `any()` to
+  %% force success when the altered opaques introduce more information (note
+  %% the inversion).
+  %%
+  %% From there, we can detect opacity violations by checking whether the
+  %% infimum of (blinded `Given`) and (blinded `Required`) is equal to the
+  %% blinded infimum of `Given` and `Required`.
   Direction = case t_is_impossible(t_inf(Given, Required)) of
                 true -> ?any;
                 false -> ?opaque
               end,
-  ErrorType = case oc_mark(Required, Direction, Module) =:= Given of
-                true -> call_with_opaque;
-                false -> call_without_opaque
+
+  RequiredBlind = oc_mark(Required, Direction, Module),
+  GivenBlind = oc_mark(Given, Direction, Module),
+
+  %% If the `Required` type does not change when blinded, we know that the call
+  %% expects a transparent type and not an opaque. Note that this is merely a
+  %% heuristic, and we can clash in both ways at once should the types be
+  %% complex enough.
+  ErrorType = case t_is_equal(RequiredBlind, Required) of
+                true -> expected_transparent;
+                false -> expected_opaque
               end,
-  case {t_is_impossible(t_inf(oc_mark(Given, Direction, Module),
-                              oc_mark(Required, Direction, Module))),
-        Direction} of
+
+  case {t_is_impossible(t_inf(GivenBlind, RequiredBlind)), Direction} of
     {true, ?opaque} -> ErrorType;
     {false, ?any} -> ErrorType;
-    {_, _} -> no
+    {_, _} -> none
   end.
 
 oc_mark(?nominal({Mod, _Name, _Arity, Opacity}=Name, S0), Direction, Module) ->
@@ -469,7 +489,8 @@ oc_mark(?tuple_set(Set0), Direction, Module) ->
 oc_mark(?product(Types), Direction, Module) ->
   ?product([oc_mark(T, Direction, Module) || T <- Types]);
 oc_mark(?function(Domain, Range), Direction, Module) ->
-  ?function(oc_mark(Domain, Direction, Module), oc_mark(Range, Direction, Module));
+  ?function(oc_mark(Domain, Direction, Module),
+            oc_mark(Range, Direction, Module));
 oc_mark(?union(U0), Direction, Module) ->
   ?union([oc_mark(T, Direction, Module) || T <- U0]);
 oc_mark(?map(Pairs, DefK, DefV), Direction, Module) ->
@@ -479,58 +500,6 @@ oc_mark(?map(Pairs, DefK, DefV), Direction, Module) ->
         oc_mark(DefV, Direction, Module));
 oc_mark(T, _Direction, _Module) ->
   T.
-
-%% Returns true if Type is a nominal set containing at least one opaque type and one non-opaque type, false otherwise
--spec t_union_with_opaque(term(), ordsets:ordset(module())) -> boolean().
-t_union_with_opaque(?nominal_set(Ns, Other), Allowed) ->
-  %% check whether a nominal set is OK
-  true = opaque < transparent, %Assertion.
-  case {lists:usort([{Kind, Mod} || {Mod, _, _, Kind} <- Ns, lists:member(Mod, Allowed)]), t_is_none(Other)} of
-    {[{opaque, _}], true} ->
-      %% only opaques from the same module
-      false;
-    {[{transparent, _} | _], _} ->
-      %% transparent nominals with optional other component
-      any_union_with_opaque(Ns, Allowed);
-    {_, _} ->
-      true
-  end;
-t_union_with_opaque(?tuple(?any, ?any, ?any), _Allowed) ->
-  false;
-t_union_with_opaque(?tuple(Elements, _Arity, _Qual), Allowed) ->
-  any_union_with_opaque(Elements, Allowed);
-t_union_with_opaque(?tuple_set(_) = T, Allowed) ->
-  any_union_with_opaque(t_tuple_subtypes(T), Allowed);
-t_union_with_opaque(?list(Elements, ?nil, _Size), Allowed) ->
-  t_union_with_opaque(Elements, Allowed);
-t_union_with_opaque(?list(Elements, Termination, _Size), Allowed) ->
-  t_union_with_opaque(Elements, Allowed)
-    orelse t_union_with_opaque(Termination, Allowed);
-t_union_with_opaque(?function(Domain, Range), Allowed) ->
-  t_union_with_opaque(Domain, Allowed)
-    orelse t_union_with_opaque(Range, Allowed);
-t_union_with_opaque(?product(Elements), Allowed) ->
-  any_union_with_opaque(Elements, Allowed);
-t_union_with_opaque(?union(Elements), Allowed) ->
-  any_union_with_opaque(Elements, Allowed);
-t_union_with_opaque(?nominal({_, _, _, opaque}, _S), _Allowed) ->
-  false;
-t_union_with_opaque(?nominal({_, _, _, transparent}, S), Allowed) ->
-  t_union_with_opaque(S, Allowed);
-t_union_with_opaque(?map(Pairs, DefK, DefV), Allowed) ->
-  lists:any(fun({Key, _, Value}) ->
-                    t_union_with_opaque(Key, Allowed)
-                      orelse t_union_with_opaque(Value, Allowed)
-            end, Pairs)
-    orelse t_union_with_opaque(DefK, Allowed)
-    orelse t_union_with_opaque(DefV, Allowed);
-t_union_with_opaque(_T, _Allowed) ->
-    false.
-
-any_union_with_opaque([E | Es], Allowed) ->
-  t_union_with_opaque(E, Allowed) orelse any_union_with_opaque(Es, Allowed);
-any_union_with_opaque([], _Allowed) ->
-  false.
 
 %%-----------------------------------------------------------------------------
 %% Unit type. Signals non termination.
@@ -1032,15 +1001,41 @@ t_nominal(Name, Type) ->
     false -> ?none
   end.
 
+-spec t_nominal_module(erl_type()) -> term().
+
+t_nominal_module(?nominal({Module, _, _, _},_)) -> Module.
+
+-ifdef(DEBUG).
 -spec t_is_nominal(erl_type()) -> boolean().
 
+t_is_nominal(?nominal_set(_,?none)) -> true;
 t_is_nominal(?nominal(_,_)) -> true; 
 t_is_nominal(_) -> false. 
+-endif.
 
 -spec t_is_opaque(erl_type()) -> boolean().
 
 t_is_opaque(?nominal({_,_,_,opaque},_)) -> true; 
 t_is_opaque(_) -> false. 
+
+-spec t_is_opaque(erl_type(), module()) -> boolean().
+
+t_is_opaque(?nominal({ModA,_,_,opaque},_), ModB) ->
+  ModA =/= ModB;
+t_is_opaque(?nominal_set(Ns, ?none), Mod) ->
+  %% This is a relaxed check to reduce noise; there are many benign violations
+  %% of opacity throughout OTP and user code where we have a union of an opaque
+  %% type and a structural one that doesn't overlap.
+  lists:any(fun(N) -> t_is_opaque(N, Mod) end, Ns);
+t_is_opaque(_, _) ->
+  false.
+
+-spec t_is_same_opaque(erl_type(), erl_type()) -> boolean().
+
+t_is_same_opaque(?nominal({_,_,_,opaque}=Same,_), ?nominal(Same,_)) ->
+  true;
+t_is_same_opaque(?nominal({_,_,_,opaque},_), ?nominal({_,_,_,opaque},_)) ->
+  false.
 
 -spec t_list() -> erl_type().
 
@@ -2046,7 +2041,7 @@ t_sup1([], Type) ->
 
 -spec t_sup(erl_type(), erl_type()) -> erl_type().
 
-t_sup(T1, T2) -> 
+t_sup(T1, T2) ->
   Res = t_sup_aux(T1, T2),
   %% `Res` must be at least as general as both `T1` and `T2`.
   ?debug(t_is_subtype(subst_all_vars_to_any(T1), Res) andalso
@@ -2147,28 +2142,87 @@ t_sup_aux(?map(_, ADefK, ADefV) = A, ?map(_, BDefK, BDefV) = B) ->
       end, A, B),
   t_map(Pairs, t_sup_aux(ADefK, BDefK), t_sup_aux(ADefV, BDefV));
 %% Union of 1 or more nominal types/nominal sets
-t_sup_aux(?nominal(Name,S1), ?nominal(Name,S2)) ->
+t_sup_aux(?nominal(Name, S1), ?nominal(Name, S2)) ->
   ?nominal(Name, t_sup_aux(S1, S2));
-t_sup_aux(?nominal(_, _)=T1, ?nominal(_, _)=T2) ->
-  sup_nominal_sets([T1], [T2], ?none);
-t_sup_aux(?nominal_set(LHS_Ns, LHS_S), ?nominal_set(RHS_Ns, RHS_S)) ->
-  sup_nominal_sets(LHS_Ns, RHS_Ns, t_sup_aux(LHS_S, RHS_S));
-t_sup_aux(?nominal_set(LHS_Ns, LHS_S), ?nominal(_, _)=RHS) ->
-  sup_nominal_sets(LHS_Ns, [RHS], LHS_S);
-t_sup_aux(?nominal(_, _)=T1, ?nominal_set(_, _) = T2) ->
-  t_sup_aux(T2, T1);
-t_sup_aux(?nominal(_,S1)=T1, S2) ->
-  Inf = t_inf_aux(S1, S2),
-  case t_is_impossible(Inf) of
-    true -> ?nominal_set([T1], S2);
-    false -> t_sup_aux(S1, S2)
+t_sup_aux(?nominal(LHS_Name, ?nominal(LHS_InnerName, _)=LHS_Inner)=LHS,
+          ?nominal(RHS_Name, ?nominal(RHS_InnerName, _)=RHS_Inner)=RHS) ->
+  case t_sup_aux(LHS_Inner, RHS_Inner) of
+    ?nominal(LHS_InnerName = RHS_Name, _)=Sup ->
+      ?nominal(RHS_Name, Sup);
+    ?nominal(RHS_InnerName = LHS_Name, _)=Sup ->
+      ?nominal(LHS_Name, Sup);
+    ?nominal_set(_, ?none) when LHS_Name < RHS_Name ->
+      ?nominal_set([LHS, RHS], ?none);
+    ?nominal_set(_, ?none) ->
+      ?nominal_set([RHS, LHS], ?none)
   end;
-t_sup_aux(S1, ?nominal(_, _)=T2) ->
-  t_sup_aux(T2, S1);
-t_sup_aux(?nominal_set(N1, S1), S2) ->
-  normalize_nominal_set(N1, t_sup_aux(S1, S2), []);
-t_sup_aux(S, ?nominal_set(_, _)=T2) ->
-  t_sup_aux(T2, S);
+t_sup_aux(?nominal(LHS_Name, ?nominal(_, _)=LHS_Inner),
+          ?nominal(_, ?nominal_set(_, _))=RHS) ->
+  t_sup_aux(?nominal(LHS_Name, ?nominal_set([LHS_Inner], ?none)), RHS);
+t_sup_aux(?nominal(_, ?nominal_set(_, _))=LHS,
+          ?nominal(_, ?nominal(_, _))=RHS) ->
+  t_sup_aux(RHS, LHS);
+t_sup_aux(?nominal(LHS_Name, ?nominal(LHS_InnerName, _)=LHS_Inner)=LHS,
+          ?nominal(RHS_Name, _)=RHS) ->
+  case t_sup_aux(LHS_Inner, RHS) of
+    ?nominal_set(_, ?none) when LHS_Name < RHS_Name ->
+      ?nominal_set([LHS, RHS], ?none);
+    ?nominal_set(_, ?none) ->
+      ?nominal_set([RHS, LHS], ?none);
+    ?nominal(RHS_Name, _)=Sup ->
+      Sup;
+    ?nominal(LHS_InnerName, _)=Sup ->
+      ?nominal(LHS_Name, Sup)
+  end;
+t_sup_aux(?nominal(_, _)=LHS, ?nominal(_, ?nominal(_,_))=RHS) ->
+  t_sup_aux(RHS, LHS);
+t_sup_aux(?nominal(LHS_Name, ?nominal_set(L_Ns, L_S)),
+          ?nominal(RHS_Name, ?nominal_set(R_Ns, R_S))) ->
+  Sup0 = t_sup_aux(?nominal(LHS_Name, L_S),
+                   ?nominal(RHS_Name, R_S)),
+  LHS_Expanded = [?nominal(LHS_Name, N) || N <- L_Ns],
+  RHS_Expanded = [?nominal(RHS_Name, N) || N <- R_Ns],
+  Sup = lists:foldl(fun t_sup_aux/2, Sup0, LHS_Expanded),
+  lists:foldl(fun t_sup_aux/2, Sup, RHS_Expanded);
+t_sup_aux(?nominal(LHS_Name, ?nominal_set(L_Ns, L_S)),
+          ?nominal(_, _)=RHS) ->
+  LHS_Expanded = [?nominal(LHS_Name, N) || N <- L_Ns],
+  Sup = nominal_set_absorb(LHS_Expanded, RHS, []),
+  t_sup_aux(Sup, ?nominal(LHS_Name, L_S));
+t_sup_aux(?nominal(_, _)=LHS, ?nominal(_, ?nominal_set(_,_))=RHS) ->
+  t_sup_aux(RHS, LHS);
+t_sup_aux(?nominal(LHS_Name, _)=LHS, ?nominal(RHS_Name, _)=RHS) ->
+  case LHS_Name < RHS_Name of
+    true -> ?nominal_set([LHS, RHS], ?none);
+    false -> ?nominal_set([RHS, LHS], ?none)
+  end;
+t_sup_aux(?nominal_set(LHS_Ns, LHS_S), ?nominal_set(RHS_Ns, RHS_S)) ->
+  Sup0 = t_sup_aux(LHS_S, RHS_S),
+  ?debug(not t_is_nominal(Sup0), {LHS_S, RHS_S}),
+  Sup = lists:foldl(fun t_sup_aux/2, Sup0, LHS_Ns),
+  lists:foldl(fun t_sup_aux/2, Sup, RHS_Ns);
+t_sup_aux(?nominal_set(LHS_Ns, ?none), ?nominal(_, _)=RHS) ->
+  nominal_set_absorb(LHS_Ns, RHS, []);
+t_sup_aux(?nominal_set(LHS_Ns, Other), ?nominal(_, _)=RHS) ->
+  t_sup_aux(t_sup_aux(?nominal_set(LHS_Ns, ?none), RHS), Other);
+t_sup_aux(?nominal(_, _)=LHS, ?nominal_set(_, _)=RHS) ->
+  t_sup_aux(RHS, LHS);
+t_sup_aux(?nominal(_,LHS_S)=LHS, RHS) ->
+  ?debug(not t_is_nominal(RHS), RHS),
+  Inf = t_inf_aux(LHS_S, RHS),
+  case t_is_impossible(Inf) of
+    true -> ?nominal_set([LHS], RHS);
+    false -> t_sup_aux(LHS_S, RHS)
+  end;
+t_sup_aux(LHS, ?nominal(_, _)=RHS) ->
+  ?debug(not t_is_nominal(LHS), LHS),
+  t_sup_aux(RHS, LHS);
+t_sup_aux(?nominal_set(LHS_Ns, LHS_S), RHS) ->
+  ?debug(not t_is_nominal(RHS), RHS),
+  normalize_nominal_set(LHS_Ns, t_sup_aux(LHS_S, RHS), []);
+t_sup_aux(LHS, ?nominal_set(_, _)=RHS) ->
+  ?debug(not t_is_nominal(LHS), LHS),
+  t_sup_aux(RHS, LHS);
 t_sup_aux(T1, T2) ->
   ?union(U1) = force_union(T1),
   ?union(U2) = force_union(T2),
@@ -2181,58 +2235,71 @@ t_sup_lists([T1|Left1], [T2|Left2]) ->
 t_sup_lists([], []) ->
   [].
 
-sup_nominal_sets(Left, Right, Other) ->
-  normalize_nominal_set(sup_nominal_sets_1(Left, Right), Other, []).
-
-sup_nominal_sets_1([?nominal(Same, _) = LHS | Left],
-                   [?nominal(Same, _) = RHS | Right]) ->
-  [t_sup(LHS, RHS) | sup_nominal_sets_1(Left, Right)];
-sup_nominal_sets_1([?nominal(LHS_Name, LHS_S) = LHS | Left] = Left0,
-                   [?nominal(RHS_Name, RHS_S) = RHS | Right] = Right0) ->
-  case t_inf_aux(LHS, RHS) of
-    ?nominal(LHS_Name, _) ->
-      [?nominal(RHS_Name, t_sup(LHS_S, RHS_S)) |
-       sup_nominal_sets_1(Left, Right)];
-    ?nominal(RHS_Name, _) ->
-      [?nominal(LHS_Name, t_sup(LHS_S, RHS_S)) |
-       sup_nominal_sets_1(Left, Right)];
-    ?none when LHS_Name < RHS_Name ->
-      [LHS | sup_nominal_sets_1(Left, Right0)];
+%% Adds the new nominal `Sup` into the set of nominals `Ns0`. Note that it does
+%% not handle structurals; the caller is expected to normalize the result
+%% afterwards.
+nominal_set_absorb([?nominal(_, _)=N | Ns0], Sup, Acc) ->
+  ?debug(t_is_nominal(Sup), Sup),
+  case t_inf_aux(N, Sup) of
+    ?nominal(_, _) ->
+      %% The types overlap, abort and start over with the widened type.
+      t_sup_aux(?nominal_set(lists:reverse(Acc, Ns0), ?none),
+                t_sup_aux(N, Sup));
     ?none ->
-      [RHS | sup_nominal_sets_1(Left0, Right)]
-    end;
-sup_nominal_sets_1([_|_]=Left, []) ->
-  Left;
-sup_nominal_sets_1([], [_|_]=Right) ->
-  Right;
-sup_nominal_sets_1([], []) ->
-  [].
+      nominal_set_absorb(Ns0, Sup, [N | Acc])
+  end;
+nominal_set_absorb([], Sup, Acc) ->
+  ?debug(t_is_nominal(Sup), Sup),
+  Ns = nominal_set_absorb_merge(Acc, Sup, []),
+  ?debug(begin
+            Names = [Name || ?nominal(Name, _) <- Ns],
+            Names =:= lists:usort(Names)
+         end, {Sup, Acc, Ns}),
+  ?nominal_set(Ns, ?none).
+
+nominal_set_absorb_merge([?nominal(Same, LHS_S) | Rest],
+                         ?nominal(Same, RHS_S), Acc) ->
+  lists:reverse([?nominal(Same, t_sup_aux(LHS_S, RHS_S)) | Rest], Acc);
+nominal_set_absorb_merge([?nominal(LHS_Name, _)=LHS | Rest],
+                         ?nominal(RHS_Name, _)=RHS, Acc)
+    when LHS_Name > RHS_Name ->
+  %% Note that the list is reversed, so '>' puts this in ascending order.
+  nominal_set_absorb_merge(Rest, RHS, [LHS | Acc]);
+nominal_set_absorb_merge(Rest, RHS, Acc) ->
+  lists:reverse([RHS | Rest], Acc).
 
 normalize_nominal_set(_, ?any, _) ->
   ?any;
 normalize_nominal_set([], Other, []) ->
-  false = t_is_nominal(Other),
+  ?debug(not t_is_nominal(Other), Other),
   Other;
 normalize_nominal_set([], ?none, [?nominal(_, _) = N]) ->
   N;
-normalize_nominal_set([], Other, Nominals) ->
-  ?nominal_set(lists:reverse(Nominals), Other);
+normalize_nominal_set([], Other, Nominals0) ->
+  %% Names must be unique and in the correct order.
+  Nominals = lists:reverse(Nominals0),
+  ?debug(begin
+            Names = [Name || ?nominal(Name, _) <- Nominals],
+            Names =:= lists:usort(Names)
+         end, Nominals),
+  ?nominal_set(Nominals, Other);
 normalize_nominal_set([?nominal(_, _)=Type | Types], ?none, Nominals) ->
   normalize_nominal_set(Types, ?none, [Type | Nominals]);
 normalize_nominal_set([?none | Types], Other, Nominals) ->
   normalize_nominal_set(Types, Other, Nominals);
-normalize_nominal_set([Type | Types], Other0, Nominals) ->
-  case t_sup_aux(Type, Other0) of
-    ?nominal_set(_, _) ->
+normalize_nominal_set([Type | Types], Other, Nominals) ->
+  case t_inf_aux(Type, Other) of
+    ?none ->
       %% The `Other` type does not overlap with the nominal type, include it
       %% in the new nominal list.
       ?nominal(_, _) = Type,                    %Assertion.
-      normalize_nominal_set(Types, Other0, [Type | Nominals]);
-    Other ->
+      normalize_nominal_set(Types, Other, [Type | Nominals]);
+    _ ->
       %% `Type` is structural (can happen during limiting) or overlaps with
       %% `Other0`, start over since the new `Other` type could overlap with
       %% previously-handled nominals.
-      normalize_nominal_set(lists:reverse(Nominals, Types), Other, [])
+      t_sup_aux(?nominal_set(lists:reverse(Nominals, Types), ?none),
+                t_sup_aux(Type, Other))
   end.
 
 sup_tuple_sets(L1, L2) ->
@@ -2351,7 +2418,8 @@ t_elements(?identifier(?any) = T) -> [T];
 t_elements(?identifier(IDs)) ->
   [?identifier([T]) || T <- IDs];
 t_elements(?nominal(_, _) = T) -> [T];
-t_elements(?nominal_set(_, _) = T) -> [T];
+t_elements(?nominal_set(Ns, S)) ->
+  t_elements(S) ++ Ns;
 t_elements(?list(_, _, _) = T) -> [T];
 t_elements(?number(_, _) = T) ->
   case T of
@@ -2364,6 +2432,7 @@ t_elements(?number(_, _) = T) ->
       [t_integer(I) || I <- Set]
   end;
 t_elements(?map(_,_,_) = T) -> [T];
+t_elements(?product(_) = T) -> [T];
 t_elements(?tuple(_, _, _) = T) -> [T];
 t_elements(?tuple_set(_) = TS) ->
   case t_tuple_subtypes(TS) of
@@ -2466,35 +2535,64 @@ t_inf_aux(?map(_, ADefK, ADefV) = A, ?map(_, BDefK, BDefV) = B) ->
         t_inf_aux(ADefK, BDefK),
         t_inf_aux(ADefV, BDefV));
 %% Intersection of 1 or more nominal types
-t_inf_aux(?nominal_set(_, _)=LHS, ?nominal_set(_, _)=RHS) ->
-  inf_nominal_sets(LHS, RHS);
-t_inf_aux(?nominal_set(_, _)=LHS, ?nominal(_, _)=RHS) ->
-  %% Deliberately pass a non-normalized nominal set to simplify the code.
-  t_inf_aux(LHS, ?nominal_set([RHS], ?none));
-t_inf_aux(?nominal(_, _)=LHS, ?nominal_set(_, _)=RHS) ->
-  t_inf_aux(RHS, ?nominal_set([LHS], ?none));
-t_inf_aux(?nominal_set(_, _)=LHS, RHS) ->
-  t_inf_aux(LHS, ?nominal_set([], RHS));
-t_inf_aux(LHS, ?nominal_set(_, _)=RHS) ->
-  t_inf_aux(RHS, LHS);
 t_inf_aux(?nominal(Same, LHS_S), ?nominal(Same, RHS_S)) ->
   t_nominal(Same, t_inf_aux(LHS_S, RHS_S));
-t_inf_aux(?nominal(LHS_Name, ?nominal(L_N, _)=L_I),
-          ?nominal(RHS_Name, ?nominal(R_N, _)=R_I)) ->
-  %% Inf must be one of L_N or R_N since a nominal is by definition more
-  %% specific than its structure. If these are the same as either of the
-  %% outer names, normalize the result by removing one level of nesting.
-  case t_inf_aux(L_I, R_I) of
-    ?nominal(L_N, _)=Inf -> ?nominal(LHS_Name, Inf);
-    ?nominal(R_N, _)=Inf -> ?nominal(RHS_Name, Inf);
-    ?nominal(LHS_Name, _)=Inf -> Inf;
-    ?nominal(RHS_Name, _)=Inf -> Inf;
+t_inf_aux(?nominal(LHS_Name, ?nominal(LHS_InnerName, _)=LHS_Inner),
+          ?nominal(RHS_Name, ?nominal(RHS_InnerName, _)=RHS_Inner)) ->
+  %% FIXME: Explain this in more detail;
+  %%
+  %% Because `LHS_Name =/= RHS_Name`, the only way this can work is if
+  %% `LHS` or `RHS` is a nominal subtype of `RHS_Inner` or `LHS_Inner`,
+  %% respectively.
+  case t_inf_aux(LHS_Inner, RHS_Inner) of
+    ?nominal(LHS_InnerName = RHS_Name, _)=Inf -> ?nominal(LHS_Name, Inf);
+    ?nominal(RHS_InnerName = LHS_Name, _)=Inf -> ?nominal(RHS_Name, Inf);
     _ -> ?none
   end;
-t_inf_aux(?nominal(LHS_Name, ?nominal(_, _)=Inner),
+t_inf_aux(?nominal(LHS_Name, ?nominal_set(L_Ns, L_S)),
+          ?nominal(RHS_Name, ?nominal_set(R_Ns, R_S))) ->
+  %% As inf_nominal_sets/2 can handle non-normalized sets, we can simplify
+  %% crossing the lists by wrapping each nominal in the respective sets with
+  %% their outer name and letting the regular nested nominal clause handle it.
+  [_|_] = L_Ns,                                 %Assertion.
+  LHS_Expanded =
+    [?nominal(LHS_Name, L_S) | [?nominal(LHS_Name, N) || N <- L_Ns]],
+  [_|_] = R_Ns,                                 %Assertion.
+  RHS_Expanded =
+    [?nominal(RHS_Name, R_S) | [?nominal(RHS_Name, N) || N <- R_Ns]],
+  case inf_nominal_sets(LHS_Expanded, RHS_Expanded) of
+    ?nominal(LHS_Name, _)=Inf -> Inf;
+    ?nominal(RHS_Name, _)=Inf -> Inf;
+    ?none -> ?none
+  end;
+t_inf_aux(?nominal(LHS_Name, ?nominal(_, _)=LHS_Inner),
+          ?nominal(_, ?nominal_set(_, _))=RHS) ->
+  t_inf_aux(?nominal(LHS_Name, ?nominal_set([LHS_Inner], ?none)), RHS);
+t_inf_aux(?nominal(_, ?nominal_set(_, _))=LHS,
+          ?nominal(RHS_Name, ?nominal(_, _)=RHS_Inner)) ->
+  t_inf_aux(LHS, ?nominal(RHS_Name, ?nominal_set([RHS_Inner], ?none)));
+t_inf_aux(?nominal(LHS_Name, ?nominal_set(_, _))=LHS,
           ?nominal(_, _)=RHS) ->
-  t_nominal(LHS_Name, t_inf_aux(Inner, RHS));
-t_inf_aux(LHS, ?nominal(_, ?nominal(_, _))=RHS) ->
+  t_inf_aux(LHS, ?nominal(LHS_Name, RHS));
+t_inf_aux(?nominal(_, _)=LHS,
+          ?nominal(_, ?nominal_set(_, _))=RHS) ->
+  t_inf_aux(RHS, LHS);
+t_inf_aux(?nominal(LHS_Name, ?nominal(_, _))=LHS,
+          ?nominal(_, _)=RHS) ->
+  t_inf_aux(LHS, ?nominal(LHS_Name, RHS));
+t_inf_aux(?nominal(_, _)=LHS,
+          ?nominal(_, ?nominal(_, _))=RHS) ->
+  t_inf_aux(RHS, LHS);
+t_inf_aux(?nominal_set(LHS_Ns, LHS_S),
+          ?nominal_set(RHS_Ns, RHS_S)) ->
+  inf_nominal_sets([LHS_S | LHS_Ns], [RHS_S | RHS_Ns]);
+t_inf_aux(?nominal_set(LHS_Ns, LHS_S), ?nominal(_, _)=RHS) ->
+  inf_nominal_sets([LHS_S | LHS_Ns], [RHS]);
+t_inf_aux(?nominal(_, _)=LHS, ?nominal_set(RHS_Ns, RHS_S)) ->
+  inf_nominal_sets([LHS], [RHS_S | RHS_Ns]);
+t_inf_aux(?nominal_set(LHS_Ns, LHS_S), RHS) ->
+  inf_nominal_sets([LHS_S | LHS_Ns], [RHS]);
+t_inf_aux(LHS, ?nominal_set(_, _)=RHS) ->
   t_inf_aux(RHS, LHS);
 t_inf_aux(?nominal(_, _), ?nominal(_, _)) ->
   ?none;
@@ -2566,10 +2664,9 @@ t_inf_aux(?number(_, _) = T1, ?number(_, _) = T2) ->
       end
   end;
 t_inf_aux(?product(Types1), ?product(Types2)) ->
-  L1 = length(Types1),
-  L2 = length(Types2),
-  if L1 =:= L2 -> ?product(t_inf_lists(Types1, Types2));
-     true -> ?none
+  case {length(Types1), length(Types2)} of
+    {Same, Same} -> ?product(t_inf_lists(Types1, Types2));
+    _ -> ?none
   end;
 t_inf_aux(?product(_), _) ->
   ?none;
@@ -2630,15 +2727,14 @@ t_inf_lists_strict([T1|Left1], [T2|Left2], Acc) ->
 t_inf_lists_strict([], [], Acc) ->
   lists:reverse(Acc).
 
-inf_nominal_sets(?nominal_set(LHS_Ns, LHS_S),
-                 ?nominal_set(RHS_Ns, RHS_S)) ->
+inf_nominal_sets([_|_]=LHS, [_|_]=RHS) ->
   %% Because a nominal in LHS_Ns can be a subtype of another in RHS_Ns or of
   %% the structure in RHS_S (and vice versa), we have to t_inf/2 the cartesian
   %% product of both sets.
   %%
   %% This is quadratic but generally fast enough given the small sizes of the
   %% sets.
-  ins_cartesian([LHS_S | LHS_Ns], [RHS_S | RHS_Ns]).
+  ins_cartesian(LHS, RHS).
 
 ins_cartesian([A | As], Bs) ->
   case ins_cartesian_1(A, Bs) of

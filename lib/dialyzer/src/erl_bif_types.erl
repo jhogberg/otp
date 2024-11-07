@@ -24,7 +24,7 @@
 
 -define(BITS, 128). %This is only in bsl to convert answer to pos_inf/neg_inf.
 -export([type/3, type/4, arg_types/3,
-	 is_known/3, opaque_args/4, infinity_add/2]).
+	 is_known/3, infinity_add/2]).
 
 -import(erl_types, [number_max/1,
 		    number_min/1,
@@ -2460,44 +2460,6 @@ arg_types(M, F, A) when is_atom(M), is_atom(F),
 
 is_known(M, F, A) ->
   arg_types(M, F, A) =/= unknown.
-
--spec opaque_args(module(), atom(), arity(),
-                  [erl_types:erl_type()]) -> [pos_integer()].
-
-opaque_args(M, F, A, Xs) ->
-  case kind_of_check(M, F, A) of
-    record ->
-      [X,_Y|_] = Xs,
-      [1 ||
-	case t_is_tuple(X) of
-	  true ->
-	    false;
-	  false -> erl_types:t_is_opaque(X)
-	end];
-	subtype ->
-	  [N ||
-	    {N, X} <- lists:zip(lists:seq(1, length(Xs)), Xs),
-	    erl_types:t_is_opaque(X) =:= true];
-	find_unknown ->
-	  [];
-	no_check -> []
-	end.
-
-
-kind_of_check(erlang, is_record, 3) ->
-  record;
-kind_of_check(erlang, is_record, 2) ->
-  record;
-kind_of_check(erlang, F, A) ->
-  case erl_internal:guard_bif(F, A) orelse erl_internal:bool_op(F, A) of
-    true -> subtype;
-    false ->
-      case erl_internal:comp_op(F, A) of
-        true -> find_unknown;
-        false -> no_check
-      end
-  end;
-kind_of_check(_M, _F, _A) -> no_check.
 
 check_fun_application(Fun, Args) ->
   case t_is_fun(Fun) of

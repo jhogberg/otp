@@ -399,7 +399,6 @@ message(M, #options{encoding = Encoding}) ->
     leaf(format(F, [M])).
 
 lattribute({attribute,_Anno,type,Type}, Opts) ->
-    io:format("Type~p~n", [Type]),
     [typeattr(type, Type, Opts),leaf(".\n")];
 lattribute({attribute,_Anno,opaque,Type}, Opts) ->
     [typeattr(opaque, Type, Opts),leaf(".\n")];

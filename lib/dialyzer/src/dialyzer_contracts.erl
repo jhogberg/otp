@@ -15,7 +15,7 @@
 -module(dialyzer_contracts).
 -moduledoc false.
 
--export([check_contract/2,
+-export([check_contract/3,
 	 check_contracts/3,
 	 contracts_without_fun/3,
 	 contract_to_string/1,
@@ -240,7 +240,7 @@ check_contracts(Contracts, Callgraph, FunTypes) ->
 	  {ok, {M,F,A} = MFA} ->
 	    case orddict:find(MFA, Contracts) of
 	      {ok, Contract} ->
-		case check_contract(Contract, Type) of
+		case check_contract(Contract, Type, M) of
 		  ok ->
 		    case erl_bif_types:is_known(M, F, A) of
 		      true ->
@@ -270,6 +270,7 @@ check_contracts(Contracts, Callgraph, FunTypes) ->
       | {'error',
              'invalid_contract'
            | {'invalid_contract', {InvalidArgIdxs :: [pos_integer()], IsReturnTypeInvalid :: boolean()}}
+           | {opaque_mismatch, erl_types:erl_type()}
            | {'overlapping_contract', [module() | atom() | byte()]}
            | string()}
       | {'range_warnings',
@@ -278,23 +279,22 @@ check_contracts(Contracts, Callgraph, FunTypes) ->
                      erl_types:erl_type()}}]}.
 
 %% Checks all components of a contract
--spec check_contract(#contract{}, erl_types:erl_type()) -> check_contract_return().
+-spec check_contract(#contract{}, erl_types:erl_type(), module()) -> check_contract_return().
 
-check_contract(#contract{contracts = Contracts}, SuccType) ->
+check_contract(#contract{contracts = Contracts}, SuccType, Module) ->
   try
     Contracts1 = [{Contract, insert_constraints(Constraints)}
-		  || {Contract, Constraints} <- Contracts],
+                  || {Contract, Constraints} <- Contracts],
     Contracts2 = [erl_types:t_subst(Contract, Map)
-		  || {Contract, Map} <- Contracts1],
+                  || {Contract, Map} <- Contracts1],
     GenDomains = [erl_types:t_fun_args(C) || C <- Contracts2],
     case check_domains(GenDomains) of
       error ->
-	{error, {overlapping_contract, []}};
+        {error, {overlapping_contract, []}};
       ok ->
-	InfList = [{Contract, erl_types:t_inf(Contract, SuccType)}
-		   || Contract <- Contracts2],
-        case check_contract_inf_list(InfList, SuccType) of
-          {error, _} = Invalid -> Invalid;
+        case check_contract_list(Contracts2, SuccType, Module) of
+          {error, _}=Res ->
+            Res;
           ok ->
             case check_extraneous(Contracts2, SuccType) of
               {error, {invalid_contract, _}} = Err -> Err;
@@ -313,24 +313,28 @@ check_contract(#contract{contracts = Contracts}, SuccType) ->
     throw:{error, _} = Error -> Error
   end.
 
-locate_invalid_elems(InfList) ->
-    case InfList of
-      [{Contract, Inf}] ->
-        ArgComparisons = lists:zip(erl_types:t_fun_args(Contract),
-                                   erl_types:t_fun_args(Inf)),
-        ProblematicArgs =
-          [erl_types:t_is_none(Succ) andalso (not erl_types:t_is_none(Cont))
-            || {Cont,Succ} <- ArgComparisons],
-        ProblematicRange =
-          erl_types:t_is_none(erl_types:t_fun_range(Inf))
-          andalso (not erl_types:t_is_none(erl_types:t_fun_range(Contract))),
-        ProblematicArgIdxs = [Idx ||
-                               {Idx, IsProblematic} <-
-                                 lists:enumerate(ProblematicArgs), IsProblematic],
-        {error, {invalid_contract, {ProblematicArgIdxs, ProblematicRange}}};
-      _ ->
-        {error, invalid_contract}
-    end.
+locate_invalid_elems([Contract], SuccType) ->
+  CArgs = erl_types:t_fun_args(Contract),
+  SArgs = erl_types:t_fun_args(SuccType),
+  CRange = erl_types:t_fun_range(Contract),
+  SRange = erl_types:t_fun_range(SuccType),
+
+  ProblematicArgs =
+    [erl_types:t_is_none(erl_types:t_inf(Cont, Succ)) andalso
+      (not erl_types:t_is_none(Cont))
+      || {Cont, Succ} <- lists:zip(CArgs, SArgs)],
+
+  ProblematicRange =
+    erl_types:t_is_impossible(erl_types:t_inf(CRange, SRange))
+      =/= erl_types:t_is_impossible(CRange),
+
+  ProblematicArgIdxs = [Idx || {Idx, IsProblematic} <-
+                                  lists:enumerate(ProblematicArgs),
+                                IsProblematic],
+
+  {invalid_contract, {ProblematicArgIdxs, ProblematicRange}};
+locate_invalid_elems(_Contracts, _SuccType) ->
+  invalid_contract.
 
 check_domains([_]) -> ok;
 check_domains([Dom|Doms]) ->
@@ -342,37 +346,39 @@ check_domains([Dom|Doms]) ->
     false -> error
   end.
 
-
 %% Allow a contract if one of the overloaded contracts is possible.
 %% We used to be more strict, e.g., all overloaded contracts had to be
 %% possible.
-check_contract_inf_list(List, SuccType) ->
-  case check_contract_inf_list(List, SuccType, []) of
-    ok -> ok;
-    {error, _} -> locate_invalid_elems(List)
+check_contract_list(List, SuccType, Module) ->
+  case check_contract_list_1(List, SuccType, Module, false) of
+    invalid_contract -> {error, locate_invalid_elems(List, SuccType)};
+    {opaque_mismatch, _}=Details -> {error, Details};
+    ok -> ok
   end.
 
-check_contract_inf_list([{Contract, FunType}|Left], SuccType, OM) ->
-  FunArgs = erl_types:t_fun_args(FunType),
-  case lists:any(fun erl_types:t_is_impossible/1, FunArgs) of
-    true -> check_contract_inf_list(Left, SuccType, OM);
-    false ->
-      STRange = erl_types:t_fun_range(SuccType),
-      case erl_types:t_is_impossible(STRange) of
-	true -> ok;
-	false ->
-	  Range = erl_types:t_fun_range(FunType),
-	  case erl_types:t_is_none(erl_types:t_inf(STRange, Range)) of
-	    true ->
-              CR = erl_types:t_fun_range(Contract),
-              NewOM = [{STRange, CR}|OM],
-              check_contract_inf_list(Left, SuccType, NewOM);
-	    false -> ok
-	  end
-      end
+check_contract_list_1([Contract | Left], SuccType, Module, Valid0) ->
+  CRange = erl_types:t_fun_range(Contract),
+  SRange = erl_types:t_fun_range(SuccType),
+  case erl_types:t_opacity_conflict(SRange, CRange, Module) of
+    none ->
+      Valid = case Valid0 of
+                false ->
+                  Inf = erl_types:t_inf(Contract, SuccType),
+                  (not erl_types:t_is_impossible(Inf)) andalso
+                    (not erl_types:any_none(erl_types:t_fun_args(Inf))) andalso
+                    (erl_types:t_is_impossible(CRange) =:=
+                     erl_types:t_is_impossible(erl_types:t_fun_range(Inf)));
+                true ->
+                  true
+              end,
+      check_contract_list_1(Left, SuccType, Module, Valid);
+    _ ->
+      {opaque_mismatch, CRange}
   end;
-check_contract_inf_list([], _SuccType, OM) ->
-  {error, OM}.
+check_contract_list_1([], _SuccType, _Module, false) ->
+  invalid_contract;
+check_contract_list_1([], _SuccType, _Module, true) ->
+  ok.
 
 check_extraneous([], _SuccType) ->
     ok;
@@ -822,14 +828,16 @@ get_invalid_contract_warnings_funs([{MFA, {FileLocation, Contract, _Xtra}}|Left]
       {File, Location} = FileLocation,
       WarningInfo = {File, Location, MFA},
       NewAcc =
-	case check_contract(Contract, Sig) of
-	  {error, invalid_contract} ->
-	    [invalid_contract_warning(MFA, WarningInfo, none, Contract, Sig, RecDict)|Acc];
-	  {error, {invalid_contract, {_ProblematicArgIdxs, _IsRangeProblematic} = ProblemDetails}} ->
-	    [invalid_contract_warning(MFA, WarningInfo, ProblemDetails, Contract, Sig, RecDict)|Acc];
-	  {error, {overlapping_contract, []}} ->
-	    [overlapping_contract_warning(MFA, WarningInfo)|Acc];
-	  {range_warnings, Errors} ->
+        case check_contract(Contract, Sig, M) of
+          {error, invalid_contract} ->
+            [invalid_contract_warning(MFA, WarningInfo, none, Contract, Sig, RecDict)|Acc];
+          {error, {invalid_contract, {_ProblematicArgIdxs, _IsRangeProblematic} = ProblemDetails}} ->
+            [invalid_contract_warning(MFA, WarningInfo, ProblemDetails, Contract, Sig, RecDict)|Acc];
+          {error, {overlapping_contract, []}} ->
+            [overlapping_contract_warning(MFA, WarningInfo)|Acc];
+          {error, {opaque_mismatch, Offender}} ->
+            [contract_opaque_warning(MFA, WarningInfo, Offender, Sig, RecDict)|Acc];
+          {range_warnings, Errors} ->
             Fun =
               fun({error, {extra_range, ExtraRanges, STRange}}, Acc0) ->
                   Warn =
@@ -859,14 +867,19 @@ get_invalid_contract_warnings_funs([{MFA, {FileLocation, Contract, _Xtra}}|Left]
 	    {M, F, A} = MFA,
 	    CSig0 = get_contract_signature(Contract),
 	    CSig = erl_types:subst_all_vars_to_any(CSig0),
-	    case erl_bif_types:is_known(M, F, A) of
+
+            %% erlang:raise/3 has an inconsistent contract by design, which
+            %% becomes invalid when testing its defined contract against the
+            %% one in erl_bif_types. Hence, we explicitly ignore it.
+            case (MFA =/= {erlang, raise, 3} andalso
+                  erl_bif_types:is_known(M, F, A)) of
 	      true ->
 		%% This is strictly for contracts of functions also in
 		%% erl_bif_types
 		BifArgs = erl_bif_types:arg_types(M, F, A),
 		BifRet = erl_bif_types:type(M, F, A),
 		BifSig = erl_types:t_fun(BifArgs, BifRet),
-		case check_contract(Contract, BifSig) of
+		case check_contract(Contract, BifSig, M) of
 		  {error, _} ->
 		    [invalid_contract_warning(MFA, WarningInfo, none, Contract, BifSig, RecDict)
 		     |Acc];
@@ -891,6 +904,12 @@ invalid_contract_warning({M, F, A}, WarningInfo, ProblemDetails, Contract, SuccT
   SuccTypeStr = lists:flatten(dialyzer_utils:format_sig(SuccType, RecDict)),
   ContractTypeStr = contract_to_string(Contract),
   {?WARN_CONTRACT_TYPES, WarningInfo, {invalid_contract, [M, F, A, ProblemDetails, ContractTypeStr, SuccTypeStr]}}.
+
+contract_opaque_warning({M, F, A}, WarningInfo, OpType, SuccType, RecDict) ->
+  OpaqueStr = erl_types:t_to_string(OpType),
+  SuccTypeStr = dialyzer_utils:format_sig(SuccType, RecDict),
+  {?WARN_CONTRACT_TYPES, WarningInfo,
+   {contract_with_opaque, [M, F, A, OpaqueStr, SuccTypeStr]}}.
 
 overlapping_contract_warning({M, F, A}, WarningInfo) ->
   {?WARN_OVERLAPPING_CONTRACT, WarningInfo, {overlapping_contract, [M, F, A]}}.
