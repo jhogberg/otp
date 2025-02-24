@@ -880,10 +880,21 @@ expr({'fun',L,{function,F,A}}, St0) ->
 expr({'fun',L,{function,M,F,A}}, St0) ->
     {As,Aps,St1} = safe_list([M,F,A], St0),
     Lanno = full_anno(L, St1),
-    {#icall{anno=#a{anno=Lanno},
-	    module=#c_literal{val=erlang},
-	    name=#c_literal{val=make_fun},
-	    args=As},Aps,St1};
+    case safe_list([M, F, A], St0) of
+        {[#c_literal{val=Mod}, #c_literal{val=Func}, #c_literal{val=Arity}],
+         Aps, St1}
+          when is_atom(Mod), is_atom(Func), is_integer(Arity),
+               Arity >= 0, Arity =< 255 ->
+            %% HACK: This is generally handled by sys_core_fold, but since that
+            %% optimization may be turned off, we're doing it here to guarantee
+            %% that there will be no call to erlang:make_fun/3 in guards.
+            {#c_literal{val=erlang:make_fun(Mod, Func, Arity)}, Aps, St1};
+        {As, Aps, St1} ->
+            {#icall{anno=#a{anno=Lanno},
+                    module=#c_literal{val=erlang},
+                    name=#c_literal{val=make_fun},
+                    args=As},Aps,St1}
+    end;
 expr({'fun',L,{clauses,Cs}}, St) ->
     fun_tq(Cs, L, St, unnamed);
 expr({named_fun,L,'_',Cs}, St) ->

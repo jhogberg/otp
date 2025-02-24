@@ -2417,6 +2417,9 @@ gexpr({cons,_Anno,H,T}, Vt, St) ->
     gexpr_list([H,T], Vt, St);
 gexpr({tuple,_Anno,Es}, Vt, St) ->
     gexpr_list(Es, Vt, St);
+gexpr({'fun', _Anno,{function,{atom,_,_},{atom,_,_},{integer,_,I}}}, _Vt, St)
+  when I >= 0, I =< ?MAX_ARGUMENTS ->
+    {[],St};
 gexpr({map,_Anno,Es}, Vt, St) ->
     map_fields(Es, Vt, check_assoc_fields(Es, St), fun gexpr_list/3);
 gexpr({map,_Anno,Src,Es}, Vt, St) ->
