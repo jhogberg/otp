@@ -83,6 +83,8 @@ my @beam_global_funcs = qw(
     i_length_guard_shared
     i_length_body_shared
     i_loop_rec_shared
+    i_persistent_term_get_dynamic_shared
+    i_persistent_term_get_static_shared
     i_test_yield_shared
     int_div_rem_body_shared
     int_div_rem_guard_shared

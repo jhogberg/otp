@@ -611,6 +611,41 @@ call_ext u==0 u$func:erlang:hibernate/0 => i_hibernate
 call_ext_last u==0 u$func:erlang:hibernate/0 D => i_hibernate | deallocate D | return
 call_ext_only u==0 u$func:erlang:hibernate/0 => i_hibernate | return
 
+#
+# The persistent_term:get/1 function is converted to instructions to enable
+# inline caching.
+#
+i_move Key=c x==0 |
+  call_ext u==1 u$func:persistent_term:get/1 =>
+    i_persistent_term_get_static Key
+i_move Key=c x==0 |
+  call_ext_last u==1 u$func:persistent_term:get/1 D =>
+    i_persistent_term_get_static Key | deallocate D | return
+i_move Key=c x==0 |
+  call_ext_only u==1 u$func:persistent_term:get/1 =>
+    i_persistent_term_get_static Key | return
+
+# As above but with a `line` in between
+i_move Key=c x==0 | line Line |
+  call_ext u==1 u$func:persistent_term:get/1 =>
+    line Line | i_persistent_term_get_static Key
+i_move Key=c x==0 | line Line |
+  call_ext_last u==1 u$func:persistent_term:get/1 D =>
+    line Line | i_persistent_term_get_static Key | deallocate D | return
+i_move Key=c x==0 | line Line |
+  call_ext_only u==1 u$func:persistent_term:get/1 =>
+    line Line | i_persistent_term_get_static Key | return
+
+call_ext u==1 u$func:persistent_term:get/1 =>
+    i_persistent_term_get_dynamic
+call_ext_last u==1 u$func:persistent_term:get/1 D =>
+    i_persistent_term_get_dynamic | deallocate D | return
+call_ext_only u==1 u$func:persistent_term:get/1 =>
+    i_persistent_term_get_dynamic | return
+
+i_persistent_term_get_static c
+i_persistent_term_get_dynamic
+
 call_ext u==0 u$func:os:perf_counter/0 =>
     i_perf_counter
 call_ext_last u==0 u$func:os:perf_counter/0 D =>

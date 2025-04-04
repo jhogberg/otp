@@ -28,6 +28,7 @@ extern "C"
 #include "erl_nfunc_sched.h"
 #include "bif.h"
 #include "erl_msacc.h"
+#include "erl_bif_persistent.h"
 }
 
 #if defined(ERTS_CCONV_DEBUG)
@@ -376,6 +377,299 @@ void BeamModuleAssembler::emit_i_length(const ArgLabel &Fail,
     mov_arg(Dst, RET);
 }
 
+/* ARG1 = *static* cache entry, ARG2 = key, ARG3 = yield address
+ *
+ * Result is returned in RET. */
+void BeamGlobalAssembler::emit_i_persistent_term_get_static_shared() {
+    x86::Mem entry_address = TMP_MEM1q, key = TMP_MEM2q;
+    Label error = a.newLabel(), yield = a.newLabel();
+
+    emit_enter_frame();
+
+    /* Preserve key for the error path. */
+    a.mov(key, ARG2);
+
+    emit_enter_runtime<Update::eReductions>();
+    /* ARG1 and ARG2 were set above. Set ARG3 to a benign value as we're calling
+     * for effect. */
+    a.lea(ARG3, TMP_MEM3q);
+    runtime_call<enum erts_ctrie_result (*)(PersistentTermStaticCache *,
+                                            Eterm,
+                                            Eterm *),
+                 erts_persistent_term_update_static_cache>();
+    emit_leave_runtime<Update::eReductions>();
+
+    a.cmp(RET, imm(CTRIE_NOT_FOUND));
+    a.short_().jz(error);
+
+    a.cmp(RET, imm(CTRIE_RESTART));
+    a.short_().jz(yield);
+
+    emit_leave_frame();
+    a.ret();
+
+    a.bind(yield);
+    {
+        emit_leave_frame();
+        a.pop(ARG3);
+
+        a.mov(x86::qword_ptr(c_p, offsetof(Process, current)), imm(0));
+        a.mov(x86::byte_ptr(c_p, offsetof(Process, arity)), imm(0));
+        a.jmp(labels[context_switch_simplified]);
+    }
+
+    a.bind(error);
+    {
+        static const ErtsCodeMFA bif_mfa = {am_persistent_term, am_get, 1};
+
+        emit_leave_frame();
+        a.pop(ARG2);
+
+        a.mov(RET, key);
+        a.mov(getXRef(0), RET);
+
+        a.mov(ARG4, imm(&bif_mfa));
+        a.jmp(labels[raise_exception]);
+    }
+}
+
+/* ARG1 = dynamic cache, yield address is computed from the stack value.
+ *
+ * Result is returned in RET. */
+void BeamGlobalAssembler::emit_i_persistent_term_get_dynamic_shared() {
+    Label generic = a.newLabel(), yield = a.newLabel(), flurb = a.newLabel();
+
+    emit_enter_frame();
+
+    if (hasCpuFeature(CpuFeatures::X86::kBMI2)) {
+        Label retry = a.newLabel();
+
+        a.mov(RET, getXRef(0));
+        a.mov(ARG2, RET);
+
+        a.and_(RETb, imm(_TAG_PRIMARY_MASK));
+        a.cmp(RETb, imm(TAG_PRIMARY_IMMED1));
+        a.jne(generic);
+
+        a.mov(ARG5,
+              x86::qword_ptr(ARG1,
+                             offsetof(PersistentTermDynamicCache, table)));
+
+        /* Input key is in ARG2, hash is returned in ARG3.
+         *
+         * Clobbers ARG2, ARG4, and ARG6. */
+        emit_internal_hash_helper();
+
+        ASSERT(ARG2 == x86::rdx || ARG3 == x86::rdx);
+
+        ERTS_CT_ASSERT((1 << 4) == sizeof(PersistentTermStaticCache));
+        a.mov(ARG2,
+              x86::qword_ptr(ARG5,
+                             offsetof(PersistentTermDynamicCacheTable, size)));
+        a.shl(ARG2, imm(4));
+        a.shl(ARG3, imm(4));
+
+        a.lea(ARG6,
+              x86::qword_ptr(
+                      ARG5,
+                      ARG2,
+                      0,
+                      offsetof(PersistentTermDynamicCacheTable, entries[0])));
+
+        /* index = hash % table_size, known power of 2 */
+        a.dec(ARG2);
+        a.and_(ARG3, ARG2);
+
+        a.lea(RET,
+              x86::qword_ptr(
+                      ARG5,
+                      ARG3,
+                      0,
+                      offsetof(PersistentTermDynamicCacheTable, entries[0])));
+
+        a.bind(retry);
+        {
+            a.cmp(RET, ARG6);
+            a.jz(generic);
+
+#ifdef WIN32
+            a.mov(ARG3,
+                  x86::qword_ptr(
+                          RET,
+                          offsetof(PersistentTermStaticCache, cookie.value)));
+            a.mov(ARG2,
+                  x86::qword_ptr(
+                          RET,
+                          offsetof(PersistentTermStaticCache, node.value)));
+#else
+            a.mov(ARG3,
+                  x86::qword_ptr(
+                          RET,
+                          offsetof(PersistentTermStaticCache, cookie.counter)));
+            a.mov(ARG2,
+                  x86::qword_ptr(
+                          RET,
+                          offsetof(PersistentTermStaticCache, node.counter)));
+#endif
+
+#ifdef WIN32
+            a.mov(ARG4,
+                  x86::qword_ptr(ARG2,
+                                 offsetof(PersistentTermNode, sequence.value)));
+#else
+            a.mov(ARG4,
+                  x86::qword_ptr(
+                          ARG2,
+                          offsetof(PersistentTermNode, sequence.counter)));
+#endif
+
+            /* Speculative reads; could be the sentinel node with corresponding
+             * garbage values. */
+            a.mov(ARG5,
+                  x86::qword_ptr(ARG2, offsetof(PersistentTermNode, key)));
+            a.mov(ARG2,
+                  x86::qword_ptr(ARG2, offsetof(PersistentTermNode, value)));
+
+            /* Right version? */
+            a.cmp(ARG3, ARG4);
+            a.short_().jnz(generic);
+
+            a.add(RET, imm(sizeof(PersistentTermStaticCache)));
+
+            /* Right key? */
+            a.cmp(ARG5, getXRef(0));
+            a.short_().jnz(retry);
+
+            a.mov(getXRef(0), ARG2);
+            emit_leave_frame();
+            a.ret();
+        }
+    }
+    
+    a.bind(flurb);
+    a.ud2();
+
+    a.bind(generic);
+    {
+        Label error = a.newLabel();
+
+        emit_enter_runtime();
+        /* ARG1 has already been set above */
+        a.mov(ARG2, getXRef(0));
+        /* This is only altered on success. */
+        a.lea(ARG3, getXRef(0));
+        runtime_call<enum erts_ctrie_result (*)(PersistentTermDynamicCache *,
+                                                Eterm,
+                                                Eterm *),
+                     erts_persistent_term_lookup_dynamic_cache>();
+        emit_leave_runtime();
+
+        a.cmp(RET, imm(CTRIE_NOT_FOUND));
+        a.short_().jz(error);
+        a.cmp(RET, imm(CTRIE_RESTART));
+        a.short_().jz(yield);
+
+        emit_leave_frame();
+        a.ret();
+
+        a.bind(yield);
+        {
+            a.ud2();
+
+            emit_leave_frame();
+            a.pop(ARG3);
+
+            a.mov(x86::qword_ptr(c_p, offsetof(Process, current)), imm(0));
+            a.mov(x86::byte_ptr(c_p, offsetof(Process, arity)), imm(0));
+            a.jmp(labels[context_switch_simplified]);
+        }
+
+        a.bind(error);
+        {
+            static const ErtsCodeMFA bif_mfa = {am_persistent_term, am_get, 1};
+
+            emit_leave_frame();
+            a.pop(ARG2);
+
+            a.mov(ARG4, imm(&bif_mfa));
+            a.jmp(labels[raise_exception]);
+        }
+    }
+}
+
+void BeamModuleAssembler::emit_i_persistent_term_get_dynamic() {
+    /* FIXME: leak memory until POC is completed. */
+    PersistentTermDynamicCache *cache =
+            (PersistentTermDynamicCache *)erts_alloc(
+                    ERTS_ALC_T_PERSISTENT_TERM,
+                    sizeof(PersistentTermDynamicCache));
+
+    static ErtsCodeMFA mfa = {am_persistent_term, am_get, 1};
+    erts_persistent_term_init_dynamic_cache(cache);
+
+    /* FIXME: yielding */
+    mov_imm(ARG1, cache);
+    fragment_call(ga->get_i_persistent_term_get_dynamic_shared());
+}
+
+void BeamModuleAssembler::emit_i_persistent_term_get_static(
+        const ArgConstant &Key) {
+    /* FIXME: leak memory until POC is completed. */
+    PersistentTermStaticCache *cache = (PersistentTermStaticCache *)erts_alloc(
+            ERTS_ALC_T_PERSISTENT_TERM,
+            sizeof(PersistentTermStaticCache));
+
+    erts_persistent_term_init_static_cache(cache);
+
+    Label entry = a.newLabel(), next = a.newLabel(), update = a.newLabel();
+
+    align_erlang_cp();
+    a.bind(entry);
+
+    mov_imm(ARG1, cache);
+
+#ifdef WIN32
+    a.mov(ARG2,
+          x86::qword_ptr(ARG1,
+                         offsetof(PersistentTermStaticCache, cookie.value)));
+    a.mov(ARG3,
+          x86::qword_ptr(ARG1,
+                         offsetof(PersistentTermStaticCache, node.value)));
+#else
+    a.mov(ARG2,
+          x86::qword_ptr(ARG1,
+                         offsetof(PersistentTermStaticCache, cookie.counter)));
+    a.mov(ARG3,
+          x86::qword_ptr(ARG1,
+                         offsetof(PersistentTermStaticCache, node.counter)));
+#endif
+
+    /* Purely speculative read; could be the sentinel node with
+     * corresponding garbage value. */
+    a.mov(RET, x86::qword_ptr(ARG3, offsetof(PersistentTermNode, value)));
+
+#ifdef WIN32
+    a.mov(ARG3,
+          x86::qword_ptr(ARG3, offsetof(PersistentTermNode, sequence.value)));
+#else
+    a.mov(ARG3,
+          x86::qword_ptr(ARG3, offsetof(PersistentTermNode, sequence.counter)));
+#endif
+
+    a.cmp(ARG2, ARG3);
+    a.short_().jz(next);
+
+    a.bind(update);
+    {
+        mov_arg(ARG2, Key);
+        fragment_call(ga->get_i_persistent_term_get_static_shared());
+        a.short_().jmp(entry);
+    }
+
+    a.bind(next);
+    a.mov(getXRef(0), RET);
+}
+
 #if defined(DEBUG) || defined(ERTS_ENABLE_LOCK_CHECK)
 
 static Eterm debug_call_light_bif(Process *c_p,
@@ -541,7 +835,8 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
                   ARG1);
             a.ja(gc_after_bif_call);
 
-            /* Test if heap fragment size is larger than remaining heap size. */
+            /* Test if heap fragment size is larger than remaining heap
+             * size. */
             a.mov(ARG2, x86::qword_ptr(c_p, offsetof(Process, mbuf_sz)));
             a.lea(ARG1, x86::qword_ptr(HTOP, ARG2, 0, 3));
             a.cmp(E, ARG1);
@@ -573,8 +868,9 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
 
                 /* Trap out, our return address is on the Erlang stack.
                  *
-                 * The BIF_TRAP macros all set up c_p->arity and c_p->current,
-                 * so we can use a simplified context switch. */
+                 * The BIF_TRAP macros all set up c_p->arity and
+                 * c_p->current, so we can use a simplified context switch.
+                 */
                 a.mov(ARG3, x86::qword_ptr(c_p, offsetof(Process, i)));
                 a.jmp(labels[context_switch_simplified]);
             }
@@ -634,10 +930,10 @@ void BeamGlobalAssembler::emit_call_light_bif_shared() {
 
     a.bind(trace);
     {
-        /* Tail call the export entry instead of the BIF. If we use the native
-         * stack as the Erlang stack our return address is already on the
-         * Erlang stack. Otherwise we will have to move the return address from
-         * the native stack to the Erlang stack. */
+        /* Tail call the export entry instead of the BIF. If we use the
+         * native stack as the Erlang stack our return address is already on
+         * the Erlang stack. Otherwise we will have to move the return
+         * address from the native stack to the Erlang stack. */
 
         emit_leave_frame();
 
@@ -686,8 +982,8 @@ void BeamModuleAssembler::emit_send() {
     Label entry = a.newLabel();
 
     /* This is essentially a mirror of call_light_bif, there's no point to
-     * specializing send/2 anymore. We do it here because it's far more work to
-     * do it in the loader. */
+     * specializing send/2 anymore. We do it here because it's far more work
+     * to do it in the loader. */
     align_erlang_cp();
     a.bind(entry);
 
@@ -722,8 +1018,8 @@ void BeamGlobalAssembler::emit_bif_nif_epilogue(void) {
     }
 #endif
 
-    /* Another process may have loaded new code and somehow notified us through
-     * this call, so we must update the active code index. */
+    /* Another process may have loaded new code and somehow notified us
+     * through this call, so we must update the active code index. */
     emit_leave_runtime<Update::eReductions | Update::eStack | Update::eHeap |
                        Update::eCodeIndex>();
 
@@ -802,9 +1098,10 @@ void BeamGlobalAssembler::emit_bif_nif_epilogue(void) {
 
 /* Used by call_bif, dispatch_bif, and export_trampoline.
  *
- * Note that we don't check reductions here as we may have jumped here through
- * interpreted code (e.g. an ErtsNativeFunc or export entry) and it's very
- * tricky to yield back. Reductions are checked in module code instead.
+ * Note that we don't check reductions here as we may have jumped here
+ * through interpreted code (e.g. an ErtsNativeFunc or export entry) and
+ * it's very tricky to yield back. Reductions are checked in module code
+ * instead.
  *
  * ARG2 = BIF MFA
  * ARG3 = I (rip), doesn't need to point past an MFA
@@ -848,7 +1145,8 @@ void BeamGlobalAssembler::emit_call_bif_shared(void) {
 
     a.mov(ARG1, c_p);
     load_x_reg_array(ARG2);
-    /* ARG3 (I), ARG4 (func), and ARG5 (arity) have already been provided. */
+    /* ARG3 (I), ARG4 (func), and ARG5 (arity) have already been provided.
+     */
     runtime_call<Eterm (*)(Process *, Eterm *, ErtsCodePtr, ErtsBifFunc, Uint),
                  beam_jit_call_bif>();
 
@@ -863,8 +1161,8 @@ void BeamGlobalAssembler::emit_call_bif_shared(void) {
 }
 
 void BeamGlobalAssembler::emit_dispatch_bif(void) {
-    /* c_p->i points into the trampoline of a ErtsNativeFunc, right after the
-     * `info` structure. */
+    /* c_p->i points into the trampoline of a ErtsNativeFunc, right after
+     * the `info` structure. */
     a.mov(ARG3, x86::qword_ptr(c_p, offsetof(Process, i)));
 
     ERTS_CT_ASSERT(offsetof(ErtsNativeFunc, trampoline.call_bif_nif) ==
@@ -920,9 +1218,9 @@ void BeamModuleAssembler::emit_call_bif_mfa(const ArgAtom &M,
 }
 
 void BeamGlobalAssembler::emit_call_nif_early() {
-    /* Fetch and align the return address so we can tell where we came from. It
-     * points just after the trampoline word so we'll need to skip that to find
-     * our ErtsCodeInfo. */
+    /* Fetch and align the return address so we can tell where we came from.
+     * It points just after the trampoline word so we'll need to skip that
+     * to find our ErtsCodeInfo. */
     a.mov(ARG2, x86::qword_ptr(x86::rsp));
     a.sub(ARG2, imm(sizeof(UWord) + sizeof(ErtsCodeInfo)));
 
@@ -949,8 +1247,8 @@ void BeamGlobalAssembler::emit_call_nif_early() {
 
     emit_leave_runtime();
 
-    /* We won't return to the original code. We KNOW that the stack points at
-     * a return address. */
+    /* We won't return to the original code. We KNOW that the stack points
+     * at a return address. */
     a.add(x86::rsp, imm(8));
 
     /* Emulate `emit_call_nif`, loading the current (phony) instruction
@@ -963,9 +1261,10 @@ void BeamGlobalAssembler::emit_call_nif_early() {
 
 /* Used by call_nif, call_nif_early, and dispatch_nif.
  *
- * Note that we don't check reductions here as we may have jumped here through
- * interpreted code (e.g. an ErtsNativeFunc or export entry) and it's very
- * tricky to yield back. Reductions are checked in module code instead.
+ * Note that we don't check reductions here as we may have jumped here
+ * through interpreted code (e.g. an ErtsNativeFunc or export entry) and
+ * it's very tricky to yield back. Reductions are checked in module code
+ * instead.
  *
  * ARG3 = current I, just past the end of an ErtsCodeInfo. */
 void BeamGlobalAssembler::emit_call_nif_shared(void) {
@@ -1006,11 +1305,11 @@ void BeamGlobalAssembler::emit_call_nif_shared(void) {
 }
 
 void BeamGlobalAssembler::emit_dispatch_nif(void) {
-    /* c_p->i points into the trampoline of a ErtsNativeFunc, right after the
-     * `info` structure.
+    /* c_p->i points into the trampoline of a ErtsNativeFunc, right after
+     * the `info` structure.
      *
-     * ErtsNativeFunc already follows the NIF call layout, so we don't need to
-     * do anything beyond loading the address. */
+     * ErtsNativeFunc already follows the NIF call layout, so we don't need
+     * to do anything beyond loading the address. */
     ERTS_CT_ASSERT(offsetof(ErtsNativeFunc, trampoline.call_bif_nif) ==
                    sizeof(ErtsCodeInfo));
     a.mov(ARG3, x86::qword_ptr(c_p, offsetof(Process, i)));

@@ -269,6 +269,7 @@ atom eof
 atom eol
 atom Eq='=:='
 atom Eqeq='=='
+atom erase
 atom erl_erts_errors
 atom erl_init
 atom erl_kernel_errors
@@ -331,7 +332,7 @@ atom gc_minor_end
 atom gc_minor_start
 atom Ge='>='
 atom generational
-atom get_all_trap
+atom get
 atom get_internal_state_blocked
 atom get_seq_token
 atom get_size
@@ -594,6 +595,7 @@ atom profile
 atom protected
 atom protection
 atom ptab_list_continue
+atom put
 atom public
 atom queue_size
 atom raw
