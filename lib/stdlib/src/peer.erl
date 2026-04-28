@@ -1063,7 +1063,13 @@ boot_complete(Node, Result, #peer_state{notify = {ReplyTo, Tag}} = State) ->
 
 %% check if TCP connection is enabled, and starts listener
 maybe_listen(#{connection := Port}) when is_integer(Port) ->
-    {ok, LSock} = gen_tcp:listen(Port, [binary, {reuseaddr, true}, {packet, 4}]),
+    %% `reuseaddr` interacts badly with ephemereal ports, possibly aliasing any
+    %% active socket with an ephemereal port that is, specifically, not (yet)
+    %% in a listening state. We therefore disable it when we're not using a
+    %% specific port.
+    {ok, LSock} = gen_tcp:listen(Port, [binary,
+                                        {reuseaddr, Port > 0},
+                                        {packet, 4}]),
     {ok, WaitPort} = inet:port(LSock),
     %% try guessing a local IP address
     {ok, Ifs} = inet:getifaddrs(),
@@ -1075,7 +1081,10 @@ maybe_listen(#{connection := Port}) when is_integer(Port) ->
     Local = prefer_localhost([Valid || Valid <- LocalUp, is_list(inet:ntoa(Valid))], [], []),
     {LSock, {Local, WaitPort}};
 maybe_listen(#{connection := {Ip, Port}}) when is_integer(Port) ->
-    {ok, LSock} = gen_tcp:listen(Port, [binary, {reuseaddr, true}, {packet, 4}, {ip, Ip}]),
+    {ok, LSock} = gen_tcp:listen(Port, [binary,
+                                        {reuseaddr, Port > 0},
+                                        {packet, 4},
+                                        {ip, Ip}]),
     WaitPort = if Port =:= 0 -> {ok, Dyn} = inet:port(LSock), Dyn; true -> Port end,
     {LSock, {[Ip], WaitPort}};
 maybe_listen(_Options) ->
