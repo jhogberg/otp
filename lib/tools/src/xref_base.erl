@@ -804,22 +804,28 @@ process_module(State) ->
     end.
 
 abst(File, Builtins, _Mode = functions) ->
-    case beam_lib:chunks(File,
-                         [abstract_code, exports, attributes, documentation],
-                         [allow_missing_chunks]) of
+    case beam_lib:chunks(File, [abstract_code, exports, attributes]) of
         {ok, {M,[{abstract_code,no_abstract_code},
                  _X,
-                 Attrs,
-                 {documentation,_Doc}]}} ->
+                 Attrs]}} ->
             {ok, M, Attrs, no_abstract_code};
-	{ok, {M, [{abstract_code, {raw_abstract_v1, Code}},
-                  {exports,X0}, {attributes,A},
-                  {documentation, Doc}]}} ->
-	    %% R9C-
+        {ok, {M, [{abstract_code, {raw_abstract_v1, Code}},
+                  {exports,X0}, {attributes,A}]}} ->
+            %% Documentation is read separately as the analysis can do without
+            %% it (a missing chunk can mean there just isn't any documentation
+            %% for this module), and we want error compatibility with earlier
+            %% versions.
+            %%
+            %% Allowing missing chunks in general erroneously led to continuing
+            %% when 'attributes' had been stripped.
+            {ok, {M,[{documentation, Doc}]}} =
+                beam_lib:chunks(File, [documentation], [allow_missing_chunks]),
+
+            %% R9C-
             Forms0 = epp:interpret_file_attribute(Code),
-	    Forms1 = erl_expand_records:module(Forms0, []),
-	    Forms = erl_internal:add_predefined_functions(Forms1),
-	    X = mfa_exports(X0, A, M),
+            Forms1 = erl_expand_records:module(Forms0, []),
+            Forms = erl_internal:add_predefined_functions(Forms1),
+            X = mfa_exports(X0, A, M),
             Deprecated = deprecated(A, X, M),
             Documented = documented(Doc, A, M),
             Unsafe = unsafe(A, X, M),
@@ -832,13 +838,14 @@ abst(File, Builtins, _Mode = functions) ->
 	    Error
     end;
 abst(File, Builtins, _Mode = modules) ->
-    case beam_lib:chunks(File,
-                         [exports, imports, attributes, documentation],
-                         [allow_missing_chunks]) of
+    case beam_lib:chunks(File, [exports, imports, attributes]) of
         {ok, {Mod, [{exports,X0},
                     {imports,I0},
-                    {attributes,At},
-                    {documentation, Doc}]}} ->
+                    {attributes,At}]}} ->
+            %% See the 'functions' clause above.
+            {ok, {Mod,[{documentation, Doc}]}} =
+                beam_lib:chunks(File, [documentation], [allow_missing_chunks]),
+
             X1 = mfa_exports(X0, At, Mod),
             X = filter(fun(MFA) -> not (predef_fun())(MFA) end, X1),
 
@@ -1754,10 +1761,12 @@ make_libs(XU, F, AM, LibPath, LibDict) ->
      US, US_1, US_2}.
 
 collect_lib([Name | Names], Exports, Deprecated, Documented, Unsafe) ->
-    case beam_lib:chunks(Name,
-                         [exports, attributes, documentation],
-                         [allow_missing_chunks]) of
-        {ok, {M, [{exports,X}, {attributes,A}, {documentation, Doc}]}} ->
+    case beam_lib:chunks(Name, [exports, attributes]) of
+        {ok, {M, [{exports,X}, {attributes,A}]}} ->
+            %% See the 'functions' clause of xref_base:abst/3
+            {ok, {M,[{documentation, Doc}]}} =
+                beam_lib:chunks(Name, [documentation], [allow_missing_chunks]),
+
             Es = mfa_exports(X, A, M),
             %% No warnings for bad attributes...
             {Ds, _} = deprecated(A, Es, M),
