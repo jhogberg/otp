@@ -285,6 +285,7 @@ erl_init(int ncpu,
 
     erts_init_debugger();
     erts_code_ix_init();
+    erts_init_code_patches();
     erts_init_fun_table();
     init_atom_table();
     init_export_table(export_tab_sz);

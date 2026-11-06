@@ -250,6 +250,11 @@ ERTS_CODE_STAGED_FUNC__(upsert)(ERTS_CODE_STAGED_TEMPLATE_T__ *template)
                 entry = (ERTS_CODE_STAGED_ENTRY_T__*)
                     index_put_entry(&tables[staging_ix],
                                     &template->entry);
+
+#ifdef ERTS_CODE_STAGED_OBJECT_CONSTRUCTOR
+                ERTS_CODE_STAGED_OBJECT_CONSTRUCTOR(entry->object);
+#endif
+
                 ERTS_CODE_STAGED_FUNC__(write_unlock)();
             }
         } else {

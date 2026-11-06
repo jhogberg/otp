@@ -31,6 +31,7 @@
 #    include "beam_code.h"
 #    include "beam_file.h"
 #    include "beam_common.h"
+#    include "erl_code_patch.h"
 
 #    if defined(__APPLE__)
 #        include <libkern/OSCacheControl.h>
@@ -70,6 +71,7 @@ void beamasm_purge_module(const void *executable_region,
                           void *writable_region,
                           size_t size);
 void beamasm_delete_assembler(void *ba);
+ErtsCodePatch *beamasm_transfer_patches(void *ba);
 int beamasm_emit(void *ba, unsigned specific_op, BeamOp *op);
 void beamasm_emit_coverage(void *instance,
                            void *coverage,
@@ -114,13 +116,11 @@ size_t beamasm_get_offset(void *ba);
 enum erts_is_line_breakpoint beamasm_is_line_breakpoint_trampoline(
         ErtsCodePtr addr);
 
-void beamasm_unseal_module(const void *executable_region,
-                           void *writable_region,
-                           size_t size);
-void beamasm_seal_module(const void *executable_region,
-                         void *writable_region,
-                         size_t size);
-void beamasm_flush_icache(const void *address, size_t size);
+struct erl_module_instance;
+void beamasm_unseal_module(struct erl_module_instance *modi,
+                           struct erl_module_instance **chain);
+void beamasm_seal_modules(struct erl_module_instance **chain);
+void beamasm_reset_permissions(void);
 
 /* Number of bytes emitted at first label in order to support trace and nif
  * load. */

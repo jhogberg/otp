@@ -1129,21 +1129,17 @@ int beam_load_finish_emit(LoaderState *stp) {
 load_error:
 
     /* Some platforms use per-thread global permissions where a thread can
-     * either write to or execute _ALL_ JITed pages, so we must seal the module
-     * before yielding or this thread won't be able to execute any other JITed
-     * code.
-     *
-     * Note that we have to do this regardless of whether we've succeeded or
-     * not, as the module is unsealed after code generation. */
-    beamasm_seal_module(stp->executable_region,
-                        stp->writable_region,
-                        stp->loaded_size);
+     * either write to or execute _ALL_ JITed pages, so we reset them before
+     * yielding or this thread won't be able to execute any other JITed
+     * code. */
+    beamasm_reset_permissions();
 
     return ret;
 }
 
 void beam_load_finalize_code(LoaderState *stp,
                              struct erl_module_instance *inst_p) {
+    struct erl_module_instance *unsealed = NULL;
     ErtsCodeIndex staging_ix;
     int code_size;
 
@@ -1157,9 +1153,9 @@ void beam_load_finalize_code(LoaderState *stp,
     inst_p->writable_region = stp->writable_region;
     inst_p->code_hdr = stp->code_hdr;
     inst_p->code_length = code_size;
-    inst_p->unsealed = 0;
+    inst_p->unsealed = NULL;
 
-    erts_unseal_module(inst_p);
+    erts_unseal_module(inst_p, &unsealed);
 
 #ifdef ADDRESS_SANITIZER
     /*
@@ -1258,11 +1254,15 @@ void beam_load_finalize_code(LoaderState *stp,
 
             if (stp->on_load) {
                 /* Don't make the entry usable yet, keep the old definition
-                 * around until the on_load callback succeeds. */
+                 * around until the on_load callback succeeds.
+                 *
+                 * Note that we DO NOT refresh any code patches other than the
+                 * ones added by this module. */
                 ASSERT(entry->deferred == THE_NON_VALUE);
                 entry->deferred = def;
             } else {
                 entry->definitions[staging_ix] = def;
+                erts_record_refresh_patches(entry);
             }
         }
 
@@ -1272,8 +1272,23 @@ void beam_load_finalize_code(LoaderState *stp,
 
     /* Register debug / profiling info with external tools. */
     inst_p->metadata = beamasm_register_metadata(stp->ba, stp->code_hdr);
+    inst_p->patches = beamasm_transfer_patches(stp->ba);
 
-    erts_seal_module(inst_p);
+    /* Patch loading is deferred to `finish_after_on_load_2` if there's an
+     * on_load callback. */
+    if (!stp->on_load) {
+        for (ErtsCodePatch *patch = inst_p->patches; patch != NULL;
+             patch = patch->module_next) {
+            patch->module_instance = inst_p;
+            patch->action(patch, ERTS_CODE_PATCH_ACTION_LOAD);
+
+            erts_code_patch_refresh(patch);
+        }
+    }
+
+    /* Note that we do not try to defer sealing the module as
+     * `finish_after_on_load_2` may run the `on_load` callback. */
+    erts_seal_modules(&unsealed);
 
     /* Prevent literals and code from being freed. */
     (stp->load_hdr)->literal_area = NULL;

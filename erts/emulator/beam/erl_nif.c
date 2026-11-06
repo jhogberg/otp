@@ -5071,12 +5071,13 @@ Eterm erts_load_nif(Process *c_p, ErtsCodePtr I, Eterm filename, Eterm args)
 static void patch_call_nif_early(ErlNifEntry* entry,
                                  struct erl_module_instance* this_mi)
 {
+    struct erl_module_instance *unsealed = NULL;
     int i;
 
     ERTS_LC_ASSERT(erts_has_code_mod_permission());
     ERTS_LC_ASSERT(erts_lc_rwmtx_is_rwlocked(&erts_nif_call_tab_lock));
 
-    erts_unseal_module(this_mi);
+    erts_unseal_module(this_mi, &unsealed);
 
     for (i=0; i < entry->num_of_funcs; i++)
     {
@@ -5124,7 +5125,7 @@ static void patch_call_nif_early(ErlNifEntry* entry,
 #endif
     }
 
-    erts_seal_module(this_mi);
+    erts_seal_modules(&unsealed);
 }
 
 ErtsCodePtr erts_call_nif_early(Process* c_p, const ErtsCodeInfo* ci)
@@ -5159,7 +5160,9 @@ static void load_nif_1st_finisher(void* vlib)
     fin = lib->finish;
 
     if (fin) {
-        erts_unseal_module(&lib->mi_copy);
+        struct erl_module_instance *unsealed = NULL;
+
+        erts_unseal_module(&lib->mi_copy, &unsealed);
 
         for (i=0; i < lib->entry.num_of_funcs; i++) {
             const ErtsCodeInfo *ci_exec = fin->beam_stubv[i].code_info_ptr;
@@ -5199,7 +5202,7 @@ static void load_nif_1st_finisher(void* vlib)
 #endif
         }
 
-        erts_seal_module(&lib->mi_copy);
+        erts_seal_modules(&unsealed);
     }
     erts_mtx_unlock(&lib->load_mtx);
 
@@ -5231,7 +5234,9 @@ static void load_nif_2nd_finisher(void* vlib)
     erts_mtx_lock(&lib->load_mtx);
     fin = lib->finish;
     if (fin) {
-        erts_unseal_module(&lib->mi_copy);
+        struct erl_module_instance *unsealed = NULL;
+
+        erts_unseal_module(&lib->mi_copy, &unsealed);
 
         for (i=0; i < lib->entry.num_of_funcs; i++) {
             const ErtsCodeInfo *ci_exec = fin->beam_stubv[i].code_info_ptr;
@@ -5272,7 +5277,7 @@ static void load_nif_2nd_finisher(void* vlib)
 #endif
         }
 
-        erts_seal_module(&lib->mi_copy);
+        erts_seal_modules(&unsealed);
     }
     erts_mtx_unlock(&lib->load_mtx);
 

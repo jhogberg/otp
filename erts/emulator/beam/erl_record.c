@@ -89,6 +89,11 @@ record_stage(ErtsRecordEntry *obj,
 #define ERTS_CODE_STAGED_TABLE_ALLOC_TYPE ERTS_ALC_T_RECORD_TABLE
 #define ERTS_CODE_STAGED_TABLE_INITIAL_SIZE RECORD_INITIAL_SIZE
 #define ERTS_CODE_STAGED_TABLE_LIMIT RECORD_LIMIT
+#define ERTS_CODE_STAGED_OBJECT_CONSTRUCTOR(entry)                            \
+    do {                                                                      \
+        entry->patches.link_next = &entry->patches;                           \
+        entry->patches.link_previous = &entry->patches;                       \
+    } while(0)
 
 #define ERTS_CODE_STAGED_WANT_GET
 #define ERTS_CODE_STAGED_WANT_FOREACH
@@ -179,6 +184,16 @@ erts_record_put(Eterm module, Eterm name) {
     return record_staged_upsert(&template);
 }
 
+void erts_record_refresh_patches(ErtsRecordEntry *entry) {
+    /* Mark all existing patches relating to this record for refresh, in
+     * preparation for the new definition going live. */
+    for (ErtsRecordCodePatch *patch = entry->patches.link_next;
+        patch != &entry->patches;
+        patch = patch->link_next) {
+        erts_code_patch_refresh(&patch->base);
+    }
+}
+
 struct record_foreach_args {
     Eterm module;
     ErtsCodeIndex code_ix;
@@ -189,8 +204,12 @@ static void record_commit_on_load_foreach(ErtsRecordEntry *obj, void *args_)
     struct record_foreach_args *args = args_;
 
     if (obj->module == args->module) {
+        ASSERT(is_value(obj->deferred));
+
         obj->definitions[args->code_ix] = obj->deferred;
         obj->deferred = THE_NON_VALUE;
+
+        erts_record_refresh_patches(obj);
     }
 }
 
@@ -209,6 +228,8 @@ static void record_abort_on_load_foreach(ErtsRecordEntry *obj, void *args_)
     struct record_foreach_args *args = args_;
 
     if (obj->module == args->module) {
+        ASSERT(is_value(obj->deferred));
+
         obj->deferred = THE_NON_VALUE;
     }
 }

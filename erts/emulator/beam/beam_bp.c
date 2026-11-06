@@ -378,14 +378,13 @@ consolidate_export_bp_data(BpFunctions* f)
 void
 erts_consolidate_local_bp_data(BpFunctions* f)
 {
-    struct erl_module_instance *prev_mi;
+    struct erl_module_instance *unsealed = NULL;
     BpFunction* fs = f->matching;
     Uint i, n;
 
     ERTS_LC_ASSERT(erts_has_code_mod_permission());
 
     n = f->matched;
-    prev_mi = NULL;
 
     for (i = 0; i < n; i++) {
         struct erl_module_instance *mi;
@@ -394,23 +393,16 @@ erts_consolidate_local_bp_data(BpFunctions* f)
         ASSERT(fs[i].mod);
         mi = &fs[i].mod->curr;
 
-        if (prev_mi != mi) {
-            if (prev_mi != NULL) {
-                erts_seal_module(prev_mi);
-            }
-
-            erts_unseal_module(mi);
-            prev_mi = mi;
-        }
+        erts_unseal_module(mi, &unsealed);
+        ASSERT(unsealed != NULL);
+        ASSERT(mi->unsealed != NULL);
 
         ci_rw = (ErtsCodeInfo*)erts_writable_code_ptr(mi, fs[i].code_info);
 
         consolidate_bp_data(mi, ci_rw, 1);
     }
 
-    if (prev_mi != NULL) {
-        erts_seal_module(prev_mi);
-    }
+    erts_seal_modules(&unsealed);
 }
 
 void
@@ -584,11 +576,10 @@ erts_install_additional_session_bp(ErtsCodeInfo* ci_rw)
 void
 erts_install_breakpoints(BpFunctions* f)
 {
-    struct erl_module_instance *prev_mi;
+    struct erl_module_instance *unsealed = NULL;
     Uint i, n;
 
     n = f->matched;
-    prev_mi = NULL;
 
     for (i = 0; i < n; i++) {
         struct erl_module_instance *mi;
@@ -600,14 +591,7 @@ erts_install_breakpoints(BpFunctions* f)
         modp = f->matching[i].mod;
         mi = &modp->curr;
 
-        if (prev_mi != mi) {
-            if (prev_mi != NULL) {
-                erts_seal_module(prev_mi);
-            }
-
-            erts_unseal_module(mi);
-            prev_mi = mi;
-        }
+        erts_unseal_module(mi, &unsealed);
 
         ci_exec = f->matching[i].code_info;
         ci_rw = (ErtsCodeInfo*)erts_writable_code_ptr(mi, ci_exec);
@@ -668,19 +652,16 @@ erts_install_breakpoints(BpFunctions* f)
         erts_install_additional_session_bp(ci_rw);
     }
 
-    if (prev_mi != NULL) {
-        erts_seal_module(prev_mi);
-    }
+    erts_seal_modules(&unsealed);
 }
 
 void
 erts_uninstall_breakpoints(BpFunctions* f)
 {
-    struct erl_module_instance *prev_mi;
+    struct erl_module_instance *unsealed = NULL;
     Uint i, n;
 
     n = f->matched;
-    prev_mi = NULL;
 
     for (i = 0; i < n; i++) {
         struct erl_module_instance *mi = &f->matching[i].mod->curr;
@@ -689,14 +670,7 @@ erts_uninstall_breakpoints(BpFunctions* f)
 
         mi = &f->matching[i].mod->curr;
 
-        if (prev_mi != mi) {
-            if (prev_mi != NULL) {
-                erts_seal_module(prev_mi);
-            }
-
-            erts_unseal_module(mi);
-            prev_mi = mi;
-        }
+        erts_unseal_module(mi, &unsealed);
 
         ci_exec = f->matching[i].code_info;
         ci_rw = erts_writable_code_ptr(mi, ci_exec);
@@ -704,9 +678,7 @@ erts_uninstall_breakpoints(BpFunctions* f)
         uninstall_breakpoint(ci_rw, ci_exec);
     }
 
-    if (prev_mi != NULL) {
-        erts_seal_module(prev_mi);
-    }
+    erts_seal_modules(&unsealed);
 }
 
 Uint
@@ -852,7 +824,7 @@ erts_clear_all_breaks(BpFunctions* f)
 
 int
 erts_clear_module_break(Module *modp) {
-    struct erl_module_instance *mi;
+    struct erl_module_instance *mi, *unsealed;
     const BeamCodeHeader* code_hdr;
     Uint n;
     Uint i;
@@ -861,6 +833,7 @@ erts_clear_module_break(Module *modp) {
     ASSERT(modp);
 
     mi = &modp->curr;
+    unsealed = NULL;
 
     code_hdr = mi->code_hdr;
     if (!code_hdr) {
@@ -876,7 +849,7 @@ erts_clear_module_break(Module *modp) {
 
     erts_commit_staged_bp();
 
-    erts_unseal_module(mi);
+    erts_unseal_module(mi, &unsealed);
 
     for (i = 0; i < n; ++i) {
         const ErtsCodeInfo *ci_exec;
@@ -891,7 +864,7 @@ erts_clear_module_break(Module *modp) {
         ASSERT(ci_rw->gen_bp == NULL);
     }
 
-    erts_seal_module(mi);
+    erts_seal_modules(&unsealed);
 
     erts_free_breakpoints();
 
@@ -1755,9 +1728,10 @@ void erts_free_timem_info(void)
 
 
 void erts_install_line_breakpoint(struct erl_module_instance *mi, ErtsCodePtr cp_exec) {
+    struct erl_module_instance *unsealed = NULL;
     ErtsCodePtr cp_rw;
 
-    erts_unseal_module(mi);
+    erts_unseal_module(mi, &unsealed);
     cp_rw = erts_writable_code_ptr(mi, cp_exec);
 
 #ifdef BEAMASM
@@ -1776,13 +1750,14 @@ void erts_install_line_breakpoint(struct erl_module_instance *mi, ErtsCodePtr cp
 }
 #endif
 
-    erts_seal_module(mi);
+    erts_seal_modules(&unsealed);
 }
 
 void erts_uninstall_line_breakpoint(struct erl_module_instance *mi, ErtsCodePtr cp_exec) {
+    struct erl_module_instance *unsealed = NULL;
     ErtsCodePtr cp_rw;
 
-    erts_unseal_module(mi);
+    erts_unseal_module(mi, &unsealed);
     cp_rw = erts_writable_code_ptr(mi, cp_exec);
 
 #ifdef BEAMASM
@@ -1801,7 +1776,7 @@ void erts_uninstall_line_breakpoint(struct erl_module_instance *mi, ErtsCodePtr 
 }
 #endif
 
-    erts_seal_module(mi);
+    erts_seal_modules(&unsealed);
 }
 
 enum erts_is_line_breakpoint erts_is_line_breakpoint_code(ErtsCodePtr p) {
@@ -2076,25 +2051,17 @@ static void
 set_break(BpFunctions* f, Binary *match_spec, Uint break_flags,
 	  enum erts_break_op count_op, ErtsTracer tracer)
 {
-    struct erl_module_instance *prev_mi = NULL;
+    struct erl_module_instance *unsealed = NULL;
     BpFunction* fs = f->matching;
     Uint i, n;
 
     n = f->matched;
-    prev_mi = NULL;
 
     for (i = 0; i < n; i++) {
         struct erl_module_instance *mi = &fs[i].mod->curr;
         ErtsCodeInfo *ci_rw;
 
-        if (prev_mi != mi) {
-            if (prev_mi != NULL) {
-                erts_seal_module(prev_mi);
-            }
-
-            erts_unseal_module(mi);
-            prev_mi = mi;
-        }
+        erts_unseal_module(mi, &unsealed);
 
         ci_rw = (ErtsCodeInfo *)erts_writable_code_ptr(mi, fs[i].code_info);
 
@@ -2103,9 +2070,7 @@ set_break(BpFunctions* f, Binary *match_spec, Uint break_flags,
                            count_op, tracer);
     }
 
-    if (prev_mi != NULL) {
-        erts_seal_module(prev_mi);
-    }
+    erts_seal_modules(&unsealed);
 }
 
 

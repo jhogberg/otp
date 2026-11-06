@@ -25,6 +25,7 @@
 
 #include "index.h"
 #include "beam_code.h"
+#include "erl_code_patch.h"
 
 struct erl_module_instance {
     const BeamCodeHeader* code_hdr;
@@ -38,8 +39,21 @@ struct erl_module_instance {
     void *writable_region;
     void *metadata;
 
-    /* Protected by code modification permission. */
-    int unsealed;
+    /* This, and `unsealed` below, are protected by the code modification
+     * lock. */
+    ErtsCodePatch *patches;
+
+#if defined(BEAMASM) || defined(DEBUG)
+    /* A linked list of currently unsealed modules, terminated by a node
+     * pointing to itself so that we can quickly test whether a module is
+     * already unsealed by checking if this is non-NULL.
+     *
+     * This is intended to cut down on the amount of code synchronization we
+     * need to do when multiple disparate code patches act on the same module.
+     *
+     * This is protected by code modification permission. */
+    struct erl_module_instance *unsealed;
+#endif
 };
 
 typedef struct erl_module {
@@ -65,15 +79,18 @@ void *erts_writable_code_ptr(struct erl_module_instance* modi,
 
 /** @brief Opens a module for modification.
  *
- * This may only be used for one module at a time. Remember to call
- * \ref erts_seal_module before returning to Erlang code or unsealing another
- * module. */
-void erts_unseal_module(struct erl_module_instance *modi);
+ * This may be used for multiple modules at a time, but all of them must be in
+ * the same NULL-terminated \c chain for it to work. Once a module has been
+ * unsealed, it must be sealed before another chain is started.
+ *
+ * Remember to call \ref erts_seal_modules before returning to Erlang code. */
+void erts_unseal_module(struct erl_module_instance *modi,
+                        struct erl_module_instance **chain);
 
 /** @brief Seals a previously unsealed module, changing page permissions,
  * flushing code cache, et cetera as needed. The caller is responsible for
  * setting up a code barrier. */
-void erts_seal_module(struct erl_module_instance *modi);
+void erts_seal_modules(struct erl_module_instance **chain);
 
 void init_module_table(int limit);
 void module_start_staging(void);

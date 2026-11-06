@@ -29,6 +29,7 @@ extern "C"
 #include "code_ix.h"
 #include "export.h"
 #include "erl_threads.h"
+#include "module.h"
 
 #if defined(__APPLE__)
 #    include <libkern/OSCacheControl.h>
@@ -417,6 +418,31 @@ void process_main(ErtsSchedulerData *esdp) {
     pmain(esdp);
 }
 
+#if defined(__aarch64__) || defined(DEBUG)
+/* Executes the given module sealing step over the list of unsealed modules in
+ * `chain`, amortizing the requisite memory barriers. */
+template<bool Last, typename Lambda>
+static void seal_module_step(struct erl_module_instance **chain, Lambda step) {
+    struct erl_module_instance *modi = *chain;
+
+    while (modi) {
+        struct erl_module_instance *next = modi->unsealed;
+
+        step(modi->executable_region, modi->code_length);
+
+        if (Last) {
+            modi->unsealed = NULL;
+        }
+
+        if (next == modi) {
+            break;
+        }
+
+        modi = next;
+    }
+}
+#endif
+
 extern "C"
 {
     int erts_beam_jump_table(void) {
@@ -427,61 +453,59 @@ extern "C"
 #endif
     }
 
-    void beamasm_unseal_module(const void *executable_region,
-                               void *writable_region,
-                               size_t size) {
-        (void)executable_region;
-        (void)writable_region;
-        (void)size;
+    void beamasm_unseal_module(struct erl_module_instance *modi,
+                               struct erl_module_instance **chain) {
+        if (*chain == NULL) {
+            VirtMem::protect_jit_memory(VirtMem::ProtectJitAccess::kReadWrite);
+        }
 
-        VirtMem::protect_jit_memory(VirtMem::ProtectJitAccess::kReadWrite);
+#if defined(__aarch64__) || defined(DEBUG)
+        /* Only add ourselves if we haven't been unsealed yet. */
+        if (modi->unsealed == NULL) {
+            modi->unsealed = *chain ? *chain : modi;
+            *chain = modi;
+        }
+#endif
     }
 
-    void beamasm_seal_module(const void *executable_region,
-                             void *writable_region,
-                             size_t size) {
-        (void)executable_region;
-        (void)writable_region;
-        (void)size;
+    void beamasm_seal_modules(struct erl_module_instance **chain) {
+        if (*chain == NULL) {
+            return;
+        }
 
         VirtMem::protect_jit_memory(VirtMem::ProtectJitAccess::kReadExecute);
-    }
 
-    void beamasm_flush_icache(const void *address, size_t size) {
-#ifdef DEBUG
-        erts_debug_require_code_barrier();
-#endif
-
-#if defined(__aarch64__) && defined(WIN32)
-        /* Issues full memory/instruction barriers on all threads for us. */
-        FlushInstructionCache(GetCurrentProcess(), address, size);
-#elif defined(__aarch64__) && defined(__APPLE__)
-        /* Issues full memory/instruction barriers on all threads for us. */
-        sys_icache_invalidate((char *)address, size);
-#elif defined(__aarch64__) && defined(BEAMASM_MANUAL_ICACHE_FLUSHING)
+#if defined(__aarch64__) && defined(BEAMASM_MANUAL_ICACHE_FLUSHING)
         /* Note that we do not issue an instruction synchronization barrier
          * here. This is on purpose as we must issue those on all schedulers
          * and not just the calling thread, and the chances of us forgetting to
          * do that is much higher if we issue one here. */
-        UWord start, end, stride;
 
-        start = reinterpret_cast<UWord>(address);
-        end = start + size;
+        /* Flush the data cache first, using the line size we've determined on
+         * boot. */
+        seal_module_step<false>(chain, [](const void *address, size_t size) {
+            UWord start, end, stride;
 
-        stride = min_dcache_line_size;
-        for (UWord i = start & ~(stride - 1); i < end; i += stride) {
-            __asm__ __volatile__("dc cvau, %0\n" ::"r"(i) :);
-        }
+            start = reinterpret_cast<UWord>(address);
+            end = start + size;
+
+            stride = min_dcache_line_size;
+            for (UWord i = start & ~(stride - 1); i < end; i += stride) {
+                __asm__ __volatile__("dc cvau, %0\n" ::"r"(i) :);
+            }
+        });
 
         /* We need a special memory barrier between clearing dcache and icache,
          * or there's a chance that the icache on another core is invalidated
          * before the dcache, which can then be repopulated with stale data. */
         __asm__ __volatile__("dsb ish\n" ::: "memory");
 
-        stride = min_icache_line_size;
-        for (UWord i = start & ~(stride - 1); i < end; i += stride) {
-            __asm__ __volatile__("ic ivau, %0\n" ::"r"(i) :);
-        }
+        seal_module_step<true>(chain, [](const void *address, size_t size) {
+            stride = min_icache_line_size;
+            for (UWord i = start & ~(stride - 1); i < end; i += stride) {
+                __asm__ __volatile__("ic ivau, %0\n" ::"r"(i) :);
+            }
+        });
 
         /* Ensures that all cores clear their instruction cache before moving
          * on. The usual full memory barrier (`dmb sy`) executed by the thread
@@ -490,6 +514,16 @@ extern "C"
          * Note that this barrier need not be executed on other cores, it's
          * enough for them to issue an instruction synchronization barrier. */
         __asm__ __volatile__("dsb ish\n" ::: "memory");
+#elif defined(__aarch64__) && defined(WIN32)
+        seal_module_step<true>(chain, [](const void *address, size_t size) {
+            /* Issues full memory/instruction barriers on all threads for us. */
+            FlushInstructionCache(GetCurrentProcess(), address, size);
+        });
+#elif defined(__aarch64__) && defined(__APPLE__)
+        seal_module_step<true>(chain, [](const void *address, size_t size) {
+            /* Issues full memory/instruction barriers on all threads for us. */
+            sys_icache_invalidate((char *)address, size);
+        });
 #elif (defined(__x86_64__) || defined(_M_X64)) &&                              \
         defined(ERTS_THR_INSTRUCTION_BARRIER)
         /* We don't need to invalidate cache on this platform, but since we
@@ -497,12 +531,23 @@ extern "C"
          * we execute from (dual-mapped memory), we still need to issue an
          * instruction barrier on all schedulers to ensure that the change is
          * visible. */
-        (void)address;
-        (void)size;
+
+#    ifdef DEBUG
+        /* Go through the motions just to keep debug information up to date for
+         * asserts. */
+        seal_module_step<true>(chain, [](const void *address, size_t size) {
+            (void)address;
+            (void)size;
+        });
+#    endif
 #else
 #    error "Platform lacks implementation for clearing instruction cache." \
                 "Please report this bug."
 #endif
+    }
+
+    void beamasm_reset_permissions() {
+        VirtMem::protect_jit_memory(VirtMem::ProtectJitAccess::kReadExecute);
     }
 
     void *beamasm_new_assembler(Eterm mod,
@@ -576,6 +621,11 @@ extern "C"
     void beamasm_delete_assembler(void *instance) {
         BeamModuleAssembler *ba = static_cast<BeamModuleAssembler *>(instance);
         delete ba;
+    }
+
+    ErtsCodePatch *beamasm_transfer_patches(void *instance) {
+        BeamModuleAssembler *ba = static_cast<BeamModuleAssembler *>(instance);
+        return ba->transfer_patches();
     }
 
     void beamasm_purge_module(const void *executable_region,

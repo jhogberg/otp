@@ -2625,6 +2625,7 @@ handle_yield(ErtsAuxWorkData *awdp, erts_aint32_t aux_work, int waiting)
 
     yield |= erts_handle_yielded_ets_all_request(awdp);
     yield |= erts_handle_yielded_alcu_blockscan(awdp);
+    yield |= erts_handle_yielded_code_patching(awdp);
 
     /*
      * Other yielding operations...

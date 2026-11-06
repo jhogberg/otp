@@ -28,6 +28,7 @@
 #include "global.h"
 #include "beam_catches.h"
 #include "erl_record.h"
+#include "erl_code_patch.h"
 
 
 #if 0
@@ -119,6 +120,7 @@ void erts_code_ix_init(void)
 
 void erts_start_staging_code_ix(int num_new)
 {
+    erts_code_patch_start_staging();
     beam_catches_start_staging();
     erts_fun_start_staging();
     export_start_staging();
@@ -130,6 +132,7 @@ void erts_start_staging_code_ix(int num_new)
 
 void erts_end_staging_code_ix(void)
 {
+    erts_code_patch_end_staging(1);
     beam_catches_end_staging(1);
     erts_fun_end_staging(1);
     export_end_staging(1);
@@ -172,6 +175,7 @@ void erts_commit_staging_code_ix(void)
 
 void erts_abort_staging_code_ix(void)
 {
+    erts_code_patch_end_staging(0);
     beam_catches_end_staging(0);
     erts_fun_end_staging(0);
     export_end_staging(0);
@@ -523,7 +527,7 @@ void erts_debug_check_code_barrier(void) {
     ASSERT(erts_tsd_get(needs_code_barrier) == (void*)0);
 }
 
-static void erts_debug_unrequire_code_barrier(void) {
+void erts_debug_unrequire_code_barrier(void) {
     erts_tsd_set(needs_code_barrier, (void*)(0));
 }
 #endif

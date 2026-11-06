@@ -1199,17 +1199,18 @@ void BeamModuleAssembler::emit_i_m_div(const ArgLabel &Fail,
     if (Fail.get() != 0) {
         a.b_eq(resolve_beam_label(Fail, disp1MB));
     } else {
-        a.b_eq(resolve_label(cold_fragment([&](){
-            Label error = a.new_label();
+        a.b_eq(resolve_label(cold_fragment([&]() {
+                                 Label error = a.new_label();
 
-            a.bind(error);
-            mov_arg(XREG0, LHS);
-            mov_arg(XREG1, RHS);
+                                 a.bind(error);
+                                 mov_arg(XREG0, LHS);
+                                 mov_arg(XREG1, RHS);
 
-            emit_raise_exception(entry, &bif_mfa);
+                                 emit_raise_exception(entry, &bif_mfa);
 
-            return error;
-        }), disp1MB));
+                                 return error;
+                             }),
+                             disp1MB));
     }
 
     mov_arg(Dst, ARG1);

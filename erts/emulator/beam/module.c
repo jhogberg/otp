@@ -82,7 +82,7 @@ void erts_module_instance_init(struct erl_module_instance* modi)
     modi->nif = NULL;
     modi->num_breakpoints = 0;
     modi->num_traced_exports = 0;
-    modi->unsealed = 0;
+    modi->unsealed = NULL;
 }
 
 static Module* module_alloc(Module* tmpl)
@@ -185,7 +185,7 @@ void *erts_writable_code_ptr(struct erl_module_instance *modi,
 {
     const char *code_start, *code_end, *ptr_raw;
 
-    ASSERT(modi->unsealed);
+    ASSERT(modi->unsealed != NULL);
 
     code_start = (char*)modi->code_hdr;
     code_end = code_start + modi->code_length;
@@ -210,46 +210,71 @@ void *erts_writable_code_ptr(struct erl_module_instance *modi,
 }
 
 #ifdef DEBUG
-/* Protected by code mod permission. */
-static struct erl_module_instance *unsealed_module = NULL;
+/* Primitive guard against the opening of multiple chains, which does not allow
+ * relocation of the chain pointer (which is okay in theory). Feel free to kill
+ * the check if that becomes necessary. */
+static struct erl_module_instance **debug_chain_ptr = NULL;
 #endif
 
-void erts_unseal_module(struct erl_module_instance *modi) {
+void erts_unseal_module(struct erl_module_instance *modi,
+                        struct erl_module_instance **chain) {
     ERTS_LC_ASSERT(erts_initialized == 0 ||
                    erts_thr_progress_is_blocking() ||
                    erts_has_code_mod_permission());
-    ASSERT(unsealed_module == NULL && !modi->unsealed);
-
-#ifdef BEAMASM
-    beamasm_unseal_module(modi->executable_region,
-                          modi->writable_region,
-                          modi->code_length);
-#endif
 
 #ifdef DEBUG
-    unsealed_module = modi;
+    erts_debug_require_code_barrier();
+
+    ASSERT(debug_chain_ptr == NULL || debug_chain_ptr == chain);
+    debug_chain_ptr = chain;
+
+    /* A module can only already be unsealed if the chain is non-empty. */
+    ASSERT(modi->unsealed == NULL || *chain != NULL);
 #endif
-    modi->unsealed = 1;
+
+#ifdef BEAMASM
+    beamasm_unseal_module(modi, chain);
+#elif DEBUG
+    if (modi->unsealed == NULL) {
+        modi->unsealed = *chain ? *chain : modi;
+        *chain = modi;
+    }
+#else
+    (void)chain;
+#endif
 }
 
-void erts_seal_module(struct erl_module_instance *modi)
+void erts_seal_modules(struct erl_module_instance **chain)
 {
     ERTS_LC_ASSERT(erts_initialized == 0 ||
                    erts_thr_progress_is_blocking() ||
                    erts_has_code_mod_permission());
-    ASSERT(unsealed_module == modi && modi->unsealed == 1);
-
 #ifdef BEAMASM
-    beamasm_flush_icache(modi->executable_region, modi->code_length);
-    beamasm_seal_module(modi->executable_region,
-                        modi->writable_region,
-                        modi->code_length);
+    beamasm_seal_modules(chain);
+#elif DEBUG
+    {
+        struct erl_module_instance *modi = *chain;
+
+        while (modi) {
+            struct erl_module_instance *next = modi->unsealed;
+
+            modi->unsealed = NULL;
+
+            if (modi == next) {
+                break;
+            }
+
+            modi = next;
+        }
+    }
+#else
+    (void)chain;
 #endif
 
 #ifdef DEBUG
-    unsealed_module = NULL;
+    ASSERT(debug_chain_ptr == NULL || debug_chain_ptr == chain);
+    debug_chain_ptr = NULL;
 #endif
-    modi->unsealed = 0;
 }
 
 Module *module_code(int i, ErtsCodeIndex code_ix)

@@ -104,6 +104,7 @@ protected:
     CodeHolder code;
     FileLogger logger;
     Section *rodata;
+    Section *cold;
 
     static bool hasCpuFeature(uint32_t featureId);
 
@@ -158,6 +159,8 @@ struct BeamModuleAssemblerCommon {
     /* The BEAM file we've been loaded from, if any. */
     const BeamFile *beam;
     Eterm mod;
+
+    ErtsCodePatch *patches;
 
     /* Map of label number to asmjit Label */
     /* BEAM labels are dense (1..num_labels), so they map to asmjit labels
@@ -224,8 +227,21 @@ struct BeamModuleAssemblerCommon {
     Label code_end;
 
     BeamModuleAssemblerCommon(const BeamFile *beam_, Eterm mod_)
-            : beam(beam_), mod(mod_) {
+            : beam(beam_), mod(mod_), patches(nullptr) {
     }
+
+    ~BeamModuleAssemblerCommon() {
+        auto patch = patches;
+
+        while (patch != nullptr) {
+            ErtsCodePatch *next = patch->module_next;
+            patch->action(patch, ERTS_CODE_PATCH_ACTION_PURGE);
+            patch = next;
+        }
+    }
+
+    /* Returns all the code patches, transferring ownership. */
+    ErtsCodePatch *transfer_patches();
 
     /* Helpers */
     const BeamArgType &getTypeEntry(const ArgSource &arg) const {
