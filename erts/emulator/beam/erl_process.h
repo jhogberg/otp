@@ -61,6 +61,7 @@ typedef struct process Process;
 #include "erl_mseg.h"
 #include "erl_async.h"
 #include "erl_gc.h"
+#include "erl_code_patch.h"
 #define ERTS_ONLY_INCLUDE_TRACE_FLAGS
 #include "erl_trace.h"
 #undef ERTS_ONLY_INCLUDE_TRACE_FLAGS
@@ -599,6 +600,7 @@ typedef struct ErtsAuxWorkData_ {
     struct {
         ErtsAlcuBlockscanYieldData alcu_blockscan;
         ErtsEtsAllYieldData ets_all;
+        ErtsCodePatchYieldData code_patch;
         /* Other yielding operations... */
     } yield;
     struct {

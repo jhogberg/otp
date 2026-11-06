@@ -50,13 +50,20 @@ BeamAssemblerCommon::BeamAssemblerCommon(BaseAssembler &assembler_)
     Error err = code.init(Environment::host());
     ERTS_ASSERT(err == Error::kOk && "Failed to init codeHolder");
 
-    Out<Section *> out(rodata);
-    err = code.new_section(out,
+    Out<Section *> out_ro(rodata);
+    err = code.new_section(out_ro,
                            ".rodata",
                            SIZE_MAX,
                            SectionFlags::kReadOnly,
                            8);
     ERTS_ASSERT(err == Error::kOk && "Failed to create .rodata section");
+    Out<Section *> out_cold(cold);
+    err = code.new_section(out_cold,
+                           ".cold",
+                           SIZE_MAX,
+                           SectionFlags::kExecutable,
+                           8);
+    ERTS_ASSERT(err == Error::kOk && "Failed to create .cold section");
 
     code.set_error_handler(this);
 }
@@ -214,6 +221,12 @@ void BeamAssemblerCommon::setLogger(FILE *log) {
     code.set_logger(&logger);
 }
 
+ErtsCodePatch *BeamModuleAssemblerCommon::transfer_patches() {
+    auto result = patches;
+    patches = nullptr;
+    return result;
+}
+
 void BeamModuleAssembler::codegen(JitAllocator *allocator,
                                   const void **executable_ptr,
                                   void **writable_ptr,
@@ -248,7 +261,7 @@ void BeamModuleAssembler::codegen(JitAllocator *allocator,
 
     /* Note that we don't make the module executable yet since we're going to
      * patch literals et cetera and it's pointless to ping-pong the page
-     * permissions. The user will call `beamasm_seal_module` to do so later
+     * permissions. The user will call `beamasm_seal_modules` to do so later
      * on. */
 
     *out_exec_hdr = code_hdr_exec;

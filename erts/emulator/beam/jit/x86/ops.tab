@@ -1354,7 +1354,13 @@ get_record_elements_id _Fail Name=a Src Size Matches=* |
   map_key_sort(Size, Matches) =>
     get_local_record_elements(Name, Src, Size, Matches)
 
-get_record_elements_id Fail _Id Src Size Matches=* |
+get_record_elements_id Fail Name=q Src Size Matches=* |
+  map_key_sort(Size, Matches) =>
+    i_get_external_record_elements Fail Name Src Size Matches
+
+i_get_external_record_elements j q xy I *
+
+get_record_elements_id Fail _Id=n Src Size Matches=* |
   map_key_sort(Size, Matches) =>
     i_get_record_elements Fail Src Size Matches
 
@@ -1363,7 +1369,7 @@ i_get_local_record_elements/3
 put_record j Name=a n Dst Live Size New=* =>
     create_local_record(Name, Dst, Live, Size, New)
 put_record Fail=j Id n Dst Live Size New=* | map_key_sort(Size, New) =>
-    i_create_native_record Fail Id Dst Live Size New
+    i_create_external_native_record Fail Id Dst Live Size New
 
 put_record Fail=j _Id Src=xy Dst Live Size Updates=* | map_key_sort(Size, Updates) =>
     i_update_native_record Fail Src Dst Live Size Updates
@@ -1378,19 +1384,24 @@ update_record_id j Hint Name=a Src Dst Live Size Updates=* |
   map_key_sort(Size, Updates) =>
     update_local_record(Hint, Name, Src, Dst, Live, Size, Updates)
 
-update_record_id Fail=j _Hint _Id Src Dst Live Size Updates=* |
+update_record_id Fail=j _Hint Name=q Src Dst Live Size Updates=* |
+  map_key_sort(Size, Updates) =>
+    i_update_external_native_record Fail Name Src Dst Live Size Updates
+
+update_record_id Fail=j _Hint _Name Src Dst Live Size Updates=* |
   map_key_sort(Size, Updates) =>
     i_update_native_record Fail Src Dst Live Size Updates
 
 i_update_local_native_record/6
 
 i_create_local_native_record q d t I *
-i_create_native_record j c d t I *
+i_create_external_native_record j q d t I *
 
 i_get_local_record_elements q xy I *
 i_get_record_elements j xy I *
 
 i_update_local_native_record a q s d t I *
+i_update_external_native_record j q s d t I *
 i_update_native_record j s d t I *
 
 is_record_accessible f xy a

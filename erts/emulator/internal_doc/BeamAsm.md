@@ -244,11 +244,12 @@ The `erts_writable_code_ptr` function can be used to get writable pointers
 given a module instance, provided that it has been unsealed first:
 
     for (i = 0; i < n; i++) {
+        struct erl_module_instance *unsealed = NULL;
         const ErtsCodeInfo* ci_exec;
         ErtsCodeInfo* ci_rw;
         void *w_ptr;
 
-        erts_unseal_module(&modp->curr);
+        erts_unseal_module(&modp->curr, &unsealed);
 
         ci_exec = code_hdr->functions[i];
         w_ptr = erts_writable_code_ptr(&modp->curr, ci_exec);
@@ -258,7 +259,7 @@ given a module instance, provided that it has been unsealed first:
         consolidate_bp_data(modp, ci_rw, 1);
         ASSERT(ci_rw->gen_bp == NULL);
 
-        erts_seal_module(&modp->curr);
+        erts_seal_modules(&unsealed);
     }
 
 Without the module instance there's no reliable way to figure out the writable

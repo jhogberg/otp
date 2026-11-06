@@ -1207,6 +1207,10 @@ class BeamModuleAssembler : public BeamAssembler,
         }
     }
 
+    void invalidate_cache() {
+        reg_cache.invalidate();
+    }
+
     void mov_preserve_cache(x86::Mem dst, x86::Gp src) {
         preserve_cache(
                 [&]() {
@@ -1252,6 +1256,18 @@ class BeamModuleAssembler : public BeamAssembler,
     /* Maps code pointers to thunks that jump to them, letting us treat global
      * fragments as if they were local. */
     std::unordered_map<void (*)(), Label> _dispatchTable;
+
+    /* Helper for emitting code in the .cold section, off the happy path. */
+    template<typename Lambda>
+    inline auto cold_fragment(Lambda lambda) {
+        auto previous = a.current_section();
+
+        a.section(cold);
+        auto result = lambda();
+        a.section(previous);
+
+        return result;
+    }
 
 public:
     BeamModuleAssembler(BeamGlobalAssembler *ga,

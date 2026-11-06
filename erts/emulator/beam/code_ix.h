@@ -282,6 +282,7 @@ void erts_abort_staging_code_ix(void);
 #ifdef DEBUG
 void erts_debug_require_code_barrier(void);
 void erts_debug_check_code_barrier(void);
+void erts_debug_unrequire_code_barrier(void);
 #endif
 
 /* Schedules an operation to run after thread progress _and_ all schedulers

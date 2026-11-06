@@ -26,9 +26,26 @@
 #include "sys.h"
 #include "code_ix.h"
 #include "erl_process.h"
+#include "erl_code_patch.h"
+
+struct ErtsRecordEntry_;
+
+typedef struct ErtsRecordCodePatch_ {
+    ErtsCodePatch base;
+
+    struct ErtsRecordCodePatch_ *link_previous, *link_next;
+    struct ErtsRecordEntry_ *entry;
+} ErtsRecordCodePatch;
 
 /* Native record entry. */
-typedef struct {
+typedef struct ErtsRecordEntry_ {
+    /* All the code patches relating to this record. We don't care what they
+     * do, all we need to know is that they should be registered to be
+     * refreshed when the record entry is updated.
+     *
+     * These are globally protected by the code modification lock. */
+    ErtsRecordCodePatch patches;
+
     Eterm module;
     Eterm name;
 
@@ -106,6 +123,8 @@ Eterm erts_canonical_record_def(ErtsRecordDefinition *defp);
 
 ErtsRecordEntry *erts_record_put(Eterm module,
                                  Eterm name);
+
+void erts_record_refresh_patches(ErtsRecordEntry *entry);
 
 bool erl_is_native_record(Eterm Src, Eterm Mod, Eterm Name);
 bool erl_is_record_accessible(Eterm src);

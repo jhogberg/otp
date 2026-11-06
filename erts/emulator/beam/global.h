@@ -929,6 +929,9 @@ Eterm erts_trapping_length_1(Process* p, Eterm* args);
 Eterm erl_is_function(Process* p, Eterm arg1, Eterm arg2);
 
 /* beam_bif_load.c */
+struct ErtsAuxWorkData_;
+int erts_handle_yielded_code_patching(struct ErtsAuxWorkData_ *awdp);
+
 Eterm erts_check_process_code(Process *c_p, Eterm module, int *redsp, int fcalls);
 #define ERTS_CLA_SCAN_WORDS_PER_RED 512
 

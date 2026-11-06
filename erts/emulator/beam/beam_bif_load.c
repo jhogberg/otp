@@ -43,6 +43,7 @@
 #include "erl_proc_sig_queue.h"
 #include "beam_file.h"
 #include "erl_record.h"
+#include "erl_code_patch.h"
 
 #include "jit/beam_asm.h"
 
@@ -294,15 +295,13 @@ static struct /* Protected by code loading permission */
 {
     Process* stager;
     ErtsCodeBarrier barrier;
+    ErtsCodePatchState patch;
 } committer_state;
 
 static Eterm staging_epilogue(Process* c_p, int, Eterm res, int, struct m*, int, int);
 
-static void commit_code_ix(void *null)
-{
+static void release_lock(void *null) {
     Process* p = committer_state.stager;
-
-    erts_commit_staging_code_ix();
 
 #ifdef DEBUG
     committer_state.stager = NULL;
@@ -317,6 +316,100 @@ static void commit_code_ix(void *null)
     erts_proc_unlock(p, ERTS_PROC_LOCK_STATUS);
 
     erts_proc_dec_refc(p);
+}
+
+static void commit_code(void *null) {
+    erts_commit_staging_code_ix();
+    release_lock(NULL);
+}
+
+static void continue_code_patching(void *esdp_)
+{
+    struct erl_module_instance *unsealed = NULL;
+    ErtsCodePatchYieldData *data;
+    ErtsSchedulerData *esdp;
+    bool finished;
+
+    esdp = (ErtsSchedulerData*)esdp_;
+
+    if (esdp) {
+        ASSERT(esdp->type == ERTS_SCHED_NORMAL);
+
+        data = ERTS_SCHED_AUX_YIELD_DATA(esdp, code_patch);
+        data->yield = false;
+    } else {
+        data = NULL;
+    }
+
+    finished = erts_code_patch_continue(&committer_state.patch, &unsealed);
+    erts_seal_modules(&unsealed);
+
+    if (finished) {
+        switch (committer_state.patch.action) {
+        case ERTS_CODE_PATCH_ACTION_DISABLE:
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_APPLY,
+                                  &committer_state.patch);
+
+            erts_schedule_code_barrier(&committer_state.barrier,
+                                       continue_code_patching,
+                                       NULL);
+            break;
+        case ERTS_CODE_PATCH_ACTION_APPLY:
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_ENABLE,
+                                  &committer_state.patch);
+            erts_commit_staging_code_ix();
+
+            erts_schedule_code_barrier(&committer_state.barrier,
+                                       continue_code_patching,
+                                       NULL);
+            break;
+        case ERTS_CODE_PATCH_ACTION_ENABLE:
+            erts_schedule_code_barrier(&committer_state.barrier,
+                                       release_lock,
+                                       NULL);
+
+            /* All done patching! */
+            break;
+        default:
+            ERTS_UNREACHABLE;
+        }
+    } else {
+        /* We don't need a code barrier until we're finished with a stage, our
+         * code patching is designed for concurrent modification and as such we
+         * don't have to worry about partially modified code.
+         *
+         * Continue as yielding aux work, moving over to a normal scheduler as
+         * necessary. */
+
+#ifdef DEBUG
+        erts_debug_unrequire_code_barrier();
+#endif
+
+        if (data) {
+            data->yield = true;
+            erts_more_yield_aux_work(&esdp->aux_work_data);
+        } else {
+            erts_schedule_misc_aux_work(1,
+                                        continue_code_patching,
+                                        ERTS_SCHEDULER_IX(0));
+        }
+    }
+}
+
+int erts_handle_yielded_code_patching(ErtsAuxWorkData *awdp) {
+    ErtsSchedulerData *esdp = awdp->esdp;
+
+    if (esdp && esdp->type == ERTS_SCHED_NORMAL) {
+        ErtsCodePatchYieldData *data = ERTS_SCHED_AUX_YIELD_DATA(esdp,
+                                                                 code_patch);
+
+        if (data->yield) {
+            continue_code_patching(esdp);
+            return data->yield;
+        }
+    }
+
+    return 0;
 }
 
 static Eterm
@@ -514,9 +607,26 @@ staging_epilogue(Process* c_p, int commit, Eterm res, int is_blocking,
     if (is_blocking || !commit)
     {
         if (commit) {
+            struct erl_module_instance *unsealed = NULL;
+            ErtsCodePatchState state;
             int i;
+
             erts_end_staging_code_ix();
+
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_DISABLE, &state);
+            while(!erts_code_patch_continue(&state, &unsealed));
+
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_APPLY, &state);
+            while(!erts_code_patch_continue(&state, &unsealed));
+
             erts_commit_staging_code_ix();
+
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_ENABLE, &state);
+            while(!erts_code_patch_continue(&state, &unsealed));
+
+            /* Possible optimization: pass `unsealed` on to
+             * `set_on_load_trace_pattern` */
+            erts_seal_modules(&unsealed);
 
             for (i=0; i < nmods; i++) {
                 if (mods[i].modp->curr.code_hdr
@@ -546,23 +656,32 @@ staging_epilogue(Process* c_p, int commit, Eterm res, int is_blocking,
 	    erts_free(ERTS_ALC_T_LOADER_TMP, mods);
 	}
 	erts_end_staging_code_ix();
-	/*
-	 * Now we must wait for all schedulers to do a memory barrier before
-	 * we can commit and let them access the new staged code. This allows
-	 * schedulers to read active code_ix in a safe way while executing
-	 * without any memory barriers at all. 
-	 */
-	ASSERT(committer_state.stager == NULL);
-	committer_state.stager = c_p;
-
-        erts_schedule_code_barrier(&committer_state.barrier,
-                                   commit_code_ix, NULL);
 
         erts_proc_inc_refc(c_p);
         erts_suspend(c_p, ERTS_PROC_LOCK_MAIN, NULL);
 
-        /* commit_code_ix(NULL) will resume us when everything is finished, at
-         * which point we'll return `res`. */
+        ASSERT(committer_state.stager == NULL);
+        committer_state.stager = c_p;
+
+        if (!erts_code_patches_pending()) {
+            /* Now we must wait for all schedulers to do a memory barrier
+             * before we can commit and let them access the new staged code.
+             * This allows schedulers to read active code_ix in a safe way
+             * while executing without any memory barriers at all. */
+            erts_schedule_code_barrier(&committer_state.barrier,
+                                       commit_code,
+                                       NULL);
+        } else {
+            /* There's at least one code patch associated with the module;
+             * apply them before scheduling a barrier as above. */
+            erts_code_patch_begin(ERTS_CODE_PATCH_ACTION_DISABLE,
+                                  &committer_state.patch);
+            continue_code_patching(c_p->scheduler_data);
+        }
+
+        /* `continue_code_patching` or `commit_code` will eventually commit the
+         * new code index and resume us when everything is finished, at which
+         * point we'll return `res`. */
         ERTS_BIF_YIELD_RETURN(c_p, res);
     }
 }
@@ -899,18 +1018,28 @@ BIF_RETTYPE finish_after_on_load_2(BIF_ALIST_2)
 	}
 
         {
+            struct erl_module_instance *unsealed = NULL;
             BeamCodeHeader *code_hdr_rw;
 
-            erts_unseal_module(&modp->curr);
+            erts_unseal_module(&modp->curr, &unsealed);
 
             code_hdr_rw = erts_writable_code_ptr(&modp->curr,
                                                  modp->curr.code_hdr);
             code_hdr_rw->on_load = NULL;
 
-            erts_seal_module(&modp->curr);
+            erts_seal_modules(&unsealed);
         }
 
         erts_record_commit_on_load(BIF_ARG_1);
+
+        /* Apply any and all deferred patches. */
+        for (ErtsCodePatch *patch = modp->curr.patches; patch != NULL;
+            patch = patch->module_next) {
+            patch->module_instance = &modp->curr;
+            patch->action(patch, ERTS_CODE_PATCH_ACTION_LOAD);
+
+            erts_code_patch_refresh(patch);
+        }
 
 	mods[0].modp = modp;
 	mods[0].module = BIF_ARG_1;
@@ -2280,6 +2409,16 @@ BIF_RETTYPE erts_internal_purge_module_2(BIF_ALIST_2)
                 if (modp->old.code_hdr->are_nifs) {
                     erts_free(ERTS_ALC_T_PREPARED_CODE,
                               modp->old.code_hdr->are_nifs);
+                }
+
+                if (modp->old.patches) {
+                    ErtsCodePatch *patch = modp->old.patches;
+
+                    while (patch) {
+                        ErtsCodePatch *next = patch->module_next;
+                        patch->action(patch, ERTS_CODE_PATCH_ACTION_PURGE);
+                        patch = next;
+                    }
                 }
 
                 beam_load_purge_aux(modp->old.code_hdr);
