@@ -34,15 +34,7 @@
 #define ATOM_BAD_ENCODING_ERROR -1
 #define ATOM_MAX_CHARS_ERROR -2
 
-#ifndef ARCH_32
-/* Internal atom cache needs MAX_ATOM_TABLE_SIZE to be less than an
-   unsigned 32 bit integer. See external.c(erts_encode_ext_dist_header_setup)
-   for more details. */
-#define MAX_ATOM_TABLE_SIZE ((MAX_ATOM_INDEX + 1 < (UWORD_CONSTANT(1) << 32)) ? MAX_ATOM_INDEX + 1 : ((UWORD_CONSTANT(1) << 31) - 1)) /* Here we use maximum signed integer value to avoid integer overflow */
-#else
 #define MAX_ATOM_TABLE_SIZE (MAX_ATOM_INDEX + 1)
-#endif
-
 
 /*
  * Atom entry.

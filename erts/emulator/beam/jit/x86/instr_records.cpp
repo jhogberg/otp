@@ -59,12 +59,19 @@ void BeamModuleAssembler::emit_is_native_record(const ArgLabel &Fail,
                            offsetof(ErtsRecordInstance, record_definition),
                            sizeof(Uint64)));
     boxed_ptr = emit_ptr_val(RET, RET);
-    cmp_arg(emit_boxed_val(boxed_ptr, offsetof(ErtsRecordDefinition, module)),
+
+    /* We're never going to see a Module or Name that doesn't fit into 32
+     * bits. Shave off a byte by making it a 32 bit operation. */
+    cmp_arg(emit_boxed_val(boxed_ptr,
+                           offsetof(ErtsRecordDefinition, module),
+                           sizeof(Uint32)),
             Module);
     preserve_cache([&]() {
         a.jne(resolve_beam_label(Fail));
     });
-    cmp_arg(emit_boxed_val(boxed_ptr, offsetof(ErtsRecordDefinition, name)),
+    cmp_arg(emit_boxed_val(boxed_ptr,
+                           offsetof(ErtsRecordDefinition, name),
+                           sizeof(Uint32)),
             Name);
     preserve_cache([&]() {
         a.jne(resolve_beam_label(Fail));

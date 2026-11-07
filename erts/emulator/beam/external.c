@@ -391,7 +391,10 @@ byte *erts_encode_ext_dist_header_setup(TTBEncodeContext *ctx,
                                         Uint fragments, Eterm from)
 {
     /* Maximum number of atom must be less than the maximum of a 32 bits
-       unsigned integer. Check is done in erl_init.c, erl_start function. */
+     * unsigned integer, which is trivially satisfied by the maximum atom index
+     * being 24 bits at the moment. */
+    ERTS_CT_ASSERT(MAX_ATOM_TABLE_SIZE < ERTS_SINT32_MAX);
+
     if (ctx->dflags & DFLAG_PENDING_CONNECT) {
         byte *ep = ctl_ext;
         ep -= 4;

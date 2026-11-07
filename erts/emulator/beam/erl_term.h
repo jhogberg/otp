@@ -294,7 +294,7 @@ _ET_DECLARE_CHECKED(Sint,signed_val,Eterm)
 #define is_nil(x)	((x) == NIL)
 #define is_not_nil(x)	((x) != NIL)
 
-#define MAX_ATOM_INDEX (~(~((Uint) 0) << (sizeof(Uint)*8 - _TAG_IMMED2_SIZE)))
+#define MAX_ATOM_INDEX ((((Uint)1) << 24) - 1)
 
 /* atom access methods */
 #define make_atom(x)  ((Eterm)(((x) << _TAG_IMMED2_SIZE) + _TAG_IMMED2_ATOM))

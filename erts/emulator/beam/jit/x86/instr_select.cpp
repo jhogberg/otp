@@ -43,7 +43,15 @@ void BeamModuleAssembler::emit_linear_search(x86::Gp comparand,
             }
         }
 
-        cmp_arg(comparand, value, ARG1);
+        if (value.isAtom()) {
+            /* Atoms cannot be larger than 32 bits, and the tag scheme ensures
+             * we cannot match a non-atom, so shave off a byte by reducing
+             * operation width. */
+            cmp_arg(comparand.r32(), value, ARG1.r32());
+        } else {
+            cmp_arg(comparand, value, ARG1);
+        }
+
         a.je(resolve_beam_label(label));
     }
 
@@ -286,13 +294,29 @@ bool BeamModuleAssembler::emit_optimized_two_way_select(bool destructive,
             diff,
             combined);
 
-    if (destructive && Bitwise::fits_signed<32>((Sint)diff)) {
-        a.or_(ARG2, imm(diff));
-        cmp_arg(ARG2, val, RET);
+    x86::Gp RET_u, ARG1_u, ARG2_u;
+
+    if (value1.isAtom()) {
+        ASSERT(value2.isAtom());
+
+        /* Atoms cannot be larger than 32 bits, so we can use the more compact
+         * 32-bit instructions. */
+        RET_u = RETd;
+        ARG1_u = ARG1d;
+        ARG2_u = ARG2d;
     } else {
-        mov_imm(RET, diff);
-        a.or_(RET, ARG2);
-        cmp_arg(RET, val, ARG1);
+        RET_u = RET;
+        ARG1_u = ARG1;
+        ARG2_u = ARG2;
+    }
+
+    if (destructive && Bitwise::fits_signed<32>((Sint)diff)) {
+        a.or_(ARG2_u, imm(diff));
+        cmp_arg(ARG2_u, val, RET_u);
+    } else {
+        mov_imm(RET_u, diff);
+        a.or_(RET_u, ARG2_u);
+        cmp_arg(RET_u, val, ARG1_u);
     }
     a.je(resolve_beam_label(label));
 

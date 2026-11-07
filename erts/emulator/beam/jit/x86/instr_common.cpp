@@ -1931,9 +1931,18 @@ void BeamModuleAssembler::emit_is_eq_exact(const ArgLabel &Fail,
     /* If one argument is known to be an immediate, we can fail
      * immediately if they're not equal. */
     if (X.isRegister() && always_immediate(Y)) {
+        size_t width = sizeof(Eterm);
+
         comment("simplified check since one argument is an immediate");
 
-        cmp_arg(getArgRef(X), Y);
+        /* Atoms cannot be larger than 32 bits, and the tag scheme ensures we
+         * cannot match a non-atom, so shave off a byte by reducing operation
+         * width. */
+        if (Y.isAtom()) {
+            width = sizeof(Uint32);
+        }
+
+        cmp_arg(getArgRef(X, width), Y);
         preserve_cache([&]() {
             a.jne(resolve_beam_label(Fail));
         });
