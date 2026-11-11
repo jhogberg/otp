@@ -1179,7 +1179,8 @@ void BeamModuleAssembler::emit_i_m_div(const ArgLabel &Fail,
                                        const ArgRegister &Dst) {
     static const ErtsCodeMFA bif_mfa = {am_erlang, am_Div, 2};
 
-    Label next = a.new_label();
+    Label entry = a.new_label();
+    a.bind(entry);
 
     auto [lhs, rhs] = load_sources(LHS, ARG2, RHS, ARG3);
 
@@ -1198,15 +1199,19 @@ void BeamModuleAssembler::emit_i_m_div(const ArgLabel &Fail,
     if (Fail.get() != 0) {
         a.b_eq(resolve_beam_label(Fail, disp1MB));
     } else {
-        a.b_ne(next);
+        a.b_eq(resolve_label(cold_fragment([&](){
+            Label error = a.new_label();
 
-        mov_arg(XREG0, LHS);
-        mov_arg(XREG1, RHS);
+            a.bind(error);
+            mov_arg(XREG0, LHS);
+            mov_arg(XREG1, RHS);
 
-        emit_raise_exception(&bif_mfa);
+            emit_raise_exception(entry, &bif_mfa);
+
+            return error;
+        }), disp1MB));
     }
 
-    a.bind(next);
     mov_arg(Dst, ARG1);
 }
 

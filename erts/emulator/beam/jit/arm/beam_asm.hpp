@@ -951,32 +951,10 @@ class BeamModuleAssembler : public BeamAssembler,
     long labelSeq = 0;
 
     /* Save the last PC for an error. */
-    size_t last_error_offset = 0;
 
     static constexpr ptrdiff_t STUB_CHECK_INTERVAL = 4 << 10;
     static constexpr ptrdiff_t STUB_CHECK_INTERVAL_UNREACHABLE =
             (4 << 10) - 128;
-    size_t last_stub_check_offset = 0;
-
-    /* Save the last known unreachable position. */
-    size_t last_unreachable_offset = 0;
-
-    /* Mark this point unreachable. This must be placed at the very end when
-     * used in a BEAM instruction, and should not be used in helper
-     * functions. */
-    void mark_unreachable() {
-        last_unreachable_offset = a.offset();
-    }
-
-    /* Use within BEAM instructions. */
-    void mark_unreachable_check_pending_stubs() {
-        mark_unreachable();
-        check_pending_stubs();
-    }
-
-    bool is_unreachable() {
-        return a.offset() == last_unreachable_offset;
-    }
 
     enum Displacement : size_t {
         /* Pessimistic estimate for helper functions, where we don't know the
@@ -1004,6 +982,7 @@ class BeamModuleAssembler : public BeamAssembler,
     static_assert(STUB_CHECK_INTERVAL < dispMin / 2);
 
     struct Veneer {
+        Section *section;
         ssize_t latestOffset;
         Label anchor;
 
@@ -1015,6 +994,7 @@ class BeamModuleAssembler : public BeamAssembler,
     };
 
     struct Constant {
+        Section *section;
         ssize_t latestOffset;
         Label anchor;
 
@@ -1026,6 +1006,7 @@ class BeamModuleAssembler : public BeamAssembler,
     };
 
     struct EmbeddedLabel {
+        Section *section;
         ssize_t latestOffset;
         Label anchor;
 
@@ -1038,13 +1019,13 @@ class BeamModuleAssembler : public BeamAssembler,
 
     /* ArgVal -> Constant
      *
-     * `_pending_constants` points directly into this container, which is
-     * documented to be safe as long as we only insert elements. */
+     * `section->pending_constants` points directly into this container, which
+     * is documented to be safe as long as we only insert elements. */
     std::unordered_multimap<ArgVal, const Constant, ArgVal::Hash> _constants;
 
     /* Label::id() -> Veneer
      *
-     * `_pending_veneers` points directly into this container. */
+     * `section->pending_veneers` points directly into this container. */
     std::unordered_multimap<uint32_t, const Veneer> _veneers;
 
     template<typename T>
@@ -1055,21 +1036,66 @@ class BeamModuleAssembler : public BeamAssembler,
 
     /* Index of Label -> EmbeddedLabel
      *
-     * `_pending_labels` points directly into this container. */
+     * `section->pending_labels` points directly into this container. */
     std::unordered_map<uint32_t, EmbeddedLabel> _embedded_labels;
 
-    /* All pending stubs, segregated by type and sorted by `latestOffset` in
-     * ascending order.
-     *
-     * We use separate queues to avoid interleaving them, as they have
-     * different sizes and alignment requirements. */
-    PendingStubs<Constant> _pending_constants;
-    PendingStubs<Veneer> _pending_veneers;
-    PendingStubs<EmbeddedLabel> _pending_labels;
+    /* Per-section data, allowing mostly seamless usage of all helpers in both
+     * the .text and .cold sections. */
+    struct {
+        /* All pending stubs, segregated by type and sorted by `latestOffset`
+         * in ascending order.
+         *
+         * We use separate queues to avoid interleaving them, as they have
+         * different sizes and alignment requirements. */
+        PendingStubs<Constant> pending_constants;
+        PendingStubs<Veneer> pending_veneers;
+        PendingStubs<EmbeddedLabel> pending_labels;
+        size_t last_error_offset = 0;
+        size_t last_stub_check_offset = 0;
+
+        /* Save the last known unreachable position. */
+        size_t last_unreachable_offset = 0;
+    } text_section__, cold_section__, *section = &text_section__;
+
+    /* Mark this point unreachable. This must be placed at the very end when
+     * used in a BEAM instruction, and should not be used in helper
+     * functions. */
+    void mark_unreachable() {
+        section->last_unreachable_offset = a.offset();
+    }
+
+    /* Use within BEAM instructions. */
+    void mark_unreachable_check_pending_stubs() {
+        mark_unreachable();
+        check_pending_stubs();
+    }
+
+    bool is_unreachable() {
+        return a.offset() == section->last_unreachable_offset;
+    }
 
     /* Maps code pointers to thunks that jump to them, letting us treat global
      * fragments as if they were local. */
     std::unordered_map<void (*)(), Label> _dispatchTable;
+
+    /* Helper for emitting code in the .cold section, off the happy path. */
+    template<typename Lambda>
+    inline auto cold_fragment(Lambda lambda) {
+        auto previous = a.current_section();
+
+        ASSERT(previous == code.text_section());
+
+        a.section(cold);
+        section = &cold_section__;
+
+        auto result = lambda();
+        check_pending_stubs();
+
+        a.section(previous);
+        section = &text_section__;
+
+        return result;
+    }
 
     RegisterCache<16, a64::Mem, a64::Gp> reg_cache =
             RegisterCache<16, a64::Mem, a64::Gp>(scheduler_registers, E, {});
@@ -1163,6 +1189,10 @@ class BeamModuleAssembler : public BeamAssembler,
                 reg_cache.trim_yregs(-offset);
             });
         }
+    }
+
+    void invalidate_cache() {
+        reg_cache.invalidate();
     }
 
     void mov_preserve_cache(a64::Vec dst, a64::Vec src) {
@@ -1535,8 +1565,8 @@ protected:
      * the current code position is unreachable. */
     void flush_pending_labels();
 
-    /* Move past the `last_error_offset` if necessary for the next instruction
-     * to be properly aligned (e.g. for line mappings). */
+    /* Move past the `section->last_error_offset` if necessary for the next
+     * instruction to be properly aligned (e.g. for line mappings). */
     void flush_last_error();
 
     /* Calls the given shared fragment, ensuring that the redzone is unused and

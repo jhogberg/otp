@@ -3073,7 +3073,7 @@ void BeamModuleAssembler::emit_raise(const ArgSource &Trace,
 
     /* `line` instructions need to know the latest offset that may throw an
      * exception. See the `line` instruction for details. */
-    last_error_offset = a.offset();
+    section->last_error_offset = a.offset();
 }
 
 void BeamModuleAssembler::emit_build_stacktrace() {
@@ -3130,7 +3130,7 @@ void BeamGlobalAssembler::emit_i_test_yield_shared() {
 void BeamModuleAssembler::emit_i_test_yield() {
     /* When present, this is guaranteed to be the first instruction after the
      * breakpoint trampoline. */
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            BEAM_ASM_FUNC_PROLOGUE_SIZE);
 
     a.adr(ARG3, current_label);
@@ -3147,7 +3147,7 @@ void BeamModuleAssembler::emit_i_test_yield() {
     a.subs(FCALLS, FCALLS, imm(1));
     a.b_le(resolve_fragment(ga->get_i_test_yield_shared(), disp1MB));
 
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            TEST_YIELD_RETURN_OFFSET);
 }
 

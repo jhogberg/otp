@@ -3244,7 +3244,7 @@ void BeamGlobalAssembler::emit_i_test_yield_shared() {
 void BeamModuleAssembler::emit_i_test_yield() {
     /* When present, this is guaranteed to be the first instruction after
      * the breakpoint trampoline. */
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            BEAM_ASM_FUNC_PROLOGUE_SIZE);
 
     emit_enter_frame();
@@ -3264,7 +3264,7 @@ void BeamModuleAssembler::emit_i_test_yield() {
     a.long_().jle(resolve_fragment(ga->get_i_test_yield_shared()));
     a.align(AlignMode::kCode, 4);
 
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            TEST_YIELD_RETURN_OFFSET);
 
 #if defined(JIT_HARD_DEBUG) && defined(ERLANG_FRAME_POINTERS)

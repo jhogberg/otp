@@ -254,12 +254,17 @@ void BeamModuleAssembler::emit_raise_exception(const ErtsCodeMFA *exp) {
 
     /* `line` instructions need to know the latest offset that may throw an
      * exception. See the `line` instruction for details. */
-    last_error_offset = a.offset();
+    section->last_error_offset = a.offset();
 }
 
 void BeamModuleAssembler::emit_raise_exception(Label I,
                                                const ErtsCodeMFA *exp) {
-    a.adr(ARG2, I);
+    if (a.current_section() == code.text_section()) {
+        a.adr(ARG2, I);
+    } else {
+        ASSERT(a.current_section() == cold);
+        a.ldr(ARG2, embed_label(I, disp32K));
+    }
 
     if (exp) {
         a.ldr(ARG4, embed_constant(exp, disp32K));

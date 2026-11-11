@@ -146,8 +146,7 @@ void BeamModuleAssembler::emit_i_nif_padding() {
     const size_t minimum_size = sizeof(UWord[BEAM_NATIVE_MIN_FUNC_SZ]);
     size_t prev_func_start, diff;
 
-    prev_func_start =
-            code.label_offset_from_base(rawLabels[functions.back() + 1]);
+    prev_func_start = code.label_offset(rawLabels[functions.back() + 1]);
     diff = a.offset() - prev_func_start;
 
     if (diff < minimum_size) {
@@ -227,7 +226,7 @@ void BeamModuleAssembler::emit_i_breakpoint_trampoline() {
 
     ASSERT(a.offset() % sizeof(UWord) == 0);
     a.bind(next);
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            BEAM_ASM_FUNC_PROLOGUE_SIZE);
 }
 
@@ -425,6 +424,8 @@ bool BeamModuleAssembler::emit(unsigned specific_op,
     uint64_t before = a.offset();
 #endif
 
+    ASSERT(a.current_section() == code.text_section());
+
 #define InstrCnt()
     switch (specific_op) {
 #include "beamasm_emit.h"
@@ -432,6 +433,8 @@ bool BeamModuleAssembler::emit(unsigned specific_op,
         ERTS_ASSERT(0 && "Invalid instruction");
         break;
     }
+
+    ASSERT(a.current_section() == code.text_section());
 
 #ifdef BEAMASM_DUMP_SIZES
     {

@@ -97,27 +97,18 @@ BeamModuleAssembler::BeamModuleAssembler(BeamGlobalAssembler *ga,
                 sizeof(ErtsCodeInfo *) * num_functions);
 
 #ifdef DEBUG
-    last_stub_check_offset = a.offset();
+    section->last_stub_check_offset = a.offset();
 #endif
 }
 
 void BeamModuleAssembler::embed_vararg_rodata(const Span<const ArgVal> &args,
                                               a64::Gp reg) {
-    /* Short sequences are inlined in the .text section for slightly better
-     * speed. */
-    bool inlineData = args.size() <= 6;
-
-    Label data = a.new_label(), next = a.new_label();
+    Label data = a.new_label();
     auto section = a.current_section();
 
-    if (inlineData) {
-        a.adr(reg, data);
-        a.b(next);
-    } else {
-        a.ldr(reg, embed_label(data, disp32K));
+    a.ldr(reg, embed_label(data, disp32K));
 
-        a.section(rodata);
-    }
+    a.section(rodata);
 
     a.align(AlignMode::kData, 8);
     a.bind(data);
@@ -154,19 +145,14 @@ void BeamModuleAssembler::embed_vararg_rodata(const Span<const ArgVal> &args,
         }
     }
 
-    if (!inlineData) {
-        a.section(section);
-    }
-
-    a.bind(next);
+    a.section(section);
 }
 
 void BeamModuleAssembler::emit_i_nif_padding() {
     const size_t minimum_size = sizeof(UWord[BEAM_NATIVE_MIN_FUNC_SZ]);
     size_t prev_func_start, diff;
 
-    prev_func_start =
-            code.label_offset_from_base(rawLabels[functions.back() + 1]);
+    prev_func_start = code.label_offset(rawLabels[functions.back() + 1]);
     diff = a.offset() - prev_func_start;
 
     if (diff < minimum_size) {
@@ -263,7 +249,7 @@ void BeamModuleAssembler::emit_i_breakpoint_trampoline() {
     a.nop();
 #endif
 
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            BEAM_ASM_FUNC_PROLOGUE_SIZE);
 }
 
@@ -464,11 +450,13 @@ bool BeamModuleAssembler::emit(unsigned specific_op,
                                const Span<const ArgVal> &args) {
     check_pending_stubs();
 
+    comment(opc[specific_op].name);
+
 #ifdef BEAMASM_DUMP_SIZES
     size_t before = a.offset();
 #endif
 
-    comment(opc[specific_op].name);
+    ASSERT(a.current_section() == code.text_section());
 
 #define InstrCnt()
     switch (specific_op) {
@@ -477,6 +465,8 @@ bool BeamModuleAssembler::emit(unsigned specific_op,
         ERTS_ASSERT(0 && "Invalid instruction");
         break;
     }
+
+    ASSERT(a.current_section() == code.text_section());
 
 #ifdef BEAMASM_DUMP_SIZES
     {
@@ -582,11 +572,13 @@ void BeamModuleAssembler::bind_veneer_target(const Label &target) {
 
         ASSERT(veneer.target == target);
 
-        if (!code.is_label_bound(veneer.anchor)) {
-            ASSERT((ssize_t)a.offset() <= veneer.latestOffset);
-            a.bind(veneer.anchor);
+        if (veneer.section == a.current_section()) {
+            if (!code.is_label_bound(veneer.anchor)) {
+                ASSERT((ssize_t)a.offset() <= veneer.latestOffset);
+                a.bind(veneer.anchor);
 
-            /* TODO: remove from pending stubs? */
+                /* TODO: remove from pending stubs? */
+            }
         }
     }
 
@@ -600,12 +592,13 @@ void BeamModuleAssembler::emit_int_code_end() {
 
     emit_nyi("int_code_end");
 
+    mark_unreachable();
+
     /* We emit the dispatch table before all remaining stubs to bind veneers
      * directly in the table itself, avoiding a painful extra jump.
      *
      * Since the table is potentially very large, we'll emit all stubs that are
      * due within it so we won't have to check on every iteration. */
-    mark_unreachable();
     flush_pending_stubs(_dispatchTable.size() * sizeof(Uint32[8]) +
                         dispUnknown);
 
@@ -620,6 +613,20 @@ void BeamModuleAssembler::emit_int_code_end() {
 
     /* Emit all remaining stubs. */
     flush_pending_stubs(dispMax);
+
+    /* Emit all stubs belonging to the .cold section-> Note that the dispatch
+     * table is already emitted in the .text section, so we do not have to care
+     * about it. */
+
+    a.section(cold);
+    section = &cold_section__;
+
+    mark_unreachable();
+    flush_pending_stubs(dispMax);
+    mark_unreachable();
+
+    a.section(code.text_section());
+    section = &text_section__;
 }
 
 void BeamModuleAssembler::emit_line(const ArgWord &Loc) {
@@ -685,8 +692,10 @@ const Label &BeamModuleAssembler::resolve_label(const Label &target,
     ASSERT(disp >= dispMin && disp <= dispMax);
     ASSERT(target.is_valid());
 
-    if (code.is_label_bound(target)) {
-        ssize_t targetOffset = code.label_offset_from_base(target);
+    auto target_entry = code.label_entry_of(target);
+
+    if (target_entry.is_bound_to(a.current_section())) {
+        ssize_t targetOffset = code.label_offset(target);
 
         /* Backward reference: skip veneers if it's already in range. */
         if (targetOffset >= minOffset) {
@@ -694,20 +703,22 @@ const Label &BeamModuleAssembler::resolve_label(const Label &target,
         }
     }
 
-    /* If a previously created veneer is reachable from this point, we can use
-     * it instead of creating a new one. */
+    /* If a previously created veneer is reachable from this point, or will be,
+     * we can use it instead of creating a new one. */
     auto range = _veneers.equal_range(target.id());
     for (auto it = range.first; it != range.second; it++) {
         const Veneer &veneer = it->second;
 
-        if (code.is_label_bound(veneer.anchor)) {
-            ssize_t veneerOffset = code.label_offset_from_base(veneer.anchor);
+        if (veneer.section == a.current_section()) {
+            if (code.is_label_bound(veneer.anchor)) {
+                ssize_t veneerOffset = code.label_offset(veneer.anchor);
 
-            if (veneerOffset >= minOffset && veneerOffset <= maxOffset) {
+                if (veneerOffset >= minOffset && veneerOffset <= maxOffset) {
+                    return veneer.anchor;
+                }
+            } else if (veneer.latestOffset <= maxOffset) {
                 return veneer.anchor;
             }
-        } else if (veneer.latestOffset <= maxOffset) {
-            return veneer.anchor;
         }
     }
 
@@ -726,10 +737,15 @@ const Label &BeamModuleAssembler::resolve_label(const Label &target,
         anchor = a.new_named_label(name.str().c_str());
     }
 
-    auto it = _veneers.emplace(target.id(), Veneer{maxOffset, anchor, target});
+    auto it = _veneers.emplace(std::piecewise_construct,
+                               std::forward_as_tuple(target.id()),
+                               std::forward_as_tuple(a.current_section(),
+                                                     maxOffset,
+                                                     anchor,
+                                                     target));
 
     const Veneer &veneer = it->second;
-    _pending_veneers.emplace(veneer);
+    section->pending_veneers.emplace(veneer);
 
     return veneer.anchor;
 }
@@ -761,21 +777,27 @@ a64::Mem BeamModuleAssembler::embed_constant(const ArgVal &value,
     for (auto it = range.first; it != range.second; it++) {
         const Constant &constant = it->second;
 
-        if (code.is_label_bound(constant.anchor)) {
-            ssize_t constOffset = code.label_offset_from_base(constant.anchor);
+        if (constant.section == a.current_section()) {
+            if (code.is_label_bound(constant.anchor)) {
+                ssize_t constOffset = code.label_offset(constant.anchor);
 
-            if (constOffset >= minOffset && constOffset <= maxOffset) {
+                if (constOffset >= minOffset && constOffset <= maxOffset) {
+                    return a64::Mem(constant.anchor);
+                }
+            } else if (constant.latestOffset <= maxOffset) {
                 return a64::Mem(constant.anchor);
             }
-        } else if (constant.latestOffset <= maxOffset) {
-            return a64::Mem(constant.anchor);
         }
     }
 
-    auto it = _constants.emplace(value,
-                                 Constant{maxOffset, a.new_label(), value});
+    auto it = _constants.emplace(std::piecewise_construct,
+                                 std::forward_as_tuple(value),
+                                 std::forward_as_tuple(a.current_section(),
+                                                       maxOffset,
+                                                       a.new_label(),
+                                                       value));
     const Constant &constant = it->second;
-    _pending_constants.emplace(constant);
+    section->pending_constants.emplace(constant);
 
     return a64::Mem(constant.anchor);
 }
@@ -788,12 +810,16 @@ a64::Mem BeamModuleAssembler::embed_label(const Label &label,
 
     ASSERT(disp >= dispMin && disp <= dispMax);
 
-    auto it = _embedded_labels.emplace(
-            label.id(),
-            EmbeddedLabel{maxOffset, a.new_label(), label});
+    auto it =
+            _embedded_labels.emplace(std::piecewise_construct,
+                                     std::forward_as_tuple(label.id()),
+                                     std::forward_as_tuple(a.current_section(),
+                                                           maxOffset,
+                                                           a.new_label(),
+                                                           label));
     ASSERT(it.second);
     const EmbeddedLabel &embedded_label = it.first->second;
-    _pending_labels.emplace(embedded_label);
+    section->pending_labels.emplace(embedded_label);
 
     return a64::Mem(embedded_label.anchor);
 }
@@ -803,20 +829,20 @@ void BeamModuleAssembler::emit_i_flush_stubs() {
      * to prevent them from being emitted inside function prologues or
      * NIF padding. */
     flush_pending_stubs(STUB_CHECK_INTERVAL * 2);
-    last_stub_check_offset = a.offset();
+    section->last_stub_check_offset = a.offset();
 }
 
 void BeamModuleAssembler::check_pending_stubs() {
     size_t currOffset = a.offset();
 
     /* We shouldn't let too much space pass between checks. */
-    ASSERT((last_stub_check_offset + dispMin) >= currOffset);
+    ASSERT((section->last_stub_check_offset + dispMin) >= currOffset);
 
-    if (last_stub_check_offset + STUB_CHECK_INTERVAL < currOffset ||
+    if (section->last_stub_check_offset + STUB_CHECK_INTERVAL < currOffset ||
         (is_unreachable() &&
-         last_stub_check_offset + STUB_CHECK_INTERVAL_UNREACHABLE <
+         section->last_stub_check_offset + STUB_CHECK_INTERVAL_UNREACHABLE <
                  currOffset)) {
-        last_stub_check_offset = currOffset;
+        section->last_stub_check_offset = currOffset;
 
         flush_pending_stubs(STUB_CHECK_INTERVAL * 2);
     }
@@ -830,7 +856,7 @@ void BeamModuleAssembler::flush_pending_stubs(size_t range) {
     ssize_t effective_offset = a.offset() + range;
     Label next;
 
-    if (!_pending_labels.empty()) {
+    if (!section->pending_labels.empty()) {
         next = a.new_label();
 
         comment("Begin stub section");
@@ -841,8 +867,10 @@ void BeamModuleAssembler::flush_pending_stubs(size_t range) {
         flush_pending_labels();
     }
 
-    while (!_pending_veneers.empty()) {
-        const Veneer &veneer = _pending_veneers.top();
+    while (!section->pending_veneers.empty()) {
+        const Veneer &veneer = section->pending_veneers.top();
+
+        ASSERT(veneer.section == a.current_section());
 
         if (veneer.latestOffset > effective_offset) {
             break;
@@ -863,11 +891,13 @@ void BeamModuleAssembler::flush_pending_stubs(size_t range) {
             effective_offset = a.offset() + range;
         }
 
-        _pending_veneers.pop();
+        section->pending_veneers.pop();
     }
 
-    while (!_pending_constants.empty()) {
-        const Constant &constant = _pending_constants.top();
+    while (!section->pending_constants.empty()) {
+        const Constant &constant = section->pending_constants.top();
+
+        ASSERT(constant.section == a.current_section());
 
         if (constant.latestOffset > effective_offset) {
             break;
@@ -889,7 +919,7 @@ void BeamModuleAssembler::flush_pending_stubs(size_t range) {
 
         effective_offset = a.offset() + range;
 
-        _pending_constants.pop();
+        section->pending_constants.pop();
     }
 
     if (next.is_valid()) {
@@ -899,17 +929,19 @@ void BeamModuleAssembler::flush_pending_stubs(size_t range) {
 }
 
 void BeamModuleAssembler::flush_pending_labels() {
-    if (!_pending_labels.empty()) {
+    if (!section->pending_labels.empty()) {
         a.align(AlignMode::kCode, 8);
     }
 
-    while (!_pending_labels.empty()) {
-        const EmbeddedLabel &embedded_label = _pending_labels.top();
+    while (!section->pending_labels.empty()) {
+        const EmbeddedLabel &embedded_label = section->pending_labels.top();
+
+        ASSERT(embedded_label.section == a.current_section());
 
         a.bind(embedded_label.anchor);
         a.embed_label(embedded_label.label, 8);
 
-        _pending_labels.pop();
+        section->pending_labels.pop();
     }
 }
 
@@ -918,20 +950,25 @@ void BeamModuleAssembler::emit_veneer(const Veneer &veneer) {
     const Label &target = veneer.target;
     bool directBranch;
 
+    ASSERT(a.current_section() == veneer.section);
+
     ASSERT(!code.is_label_bound(anchor));
     a.bind(anchor);
 
-    /* Prefer direct branches when possible. */
-    if (code.is_label_bound(target)) {
-        auto targetOffset = code.label_offset_from_base(target);
+    auto target_entry = code.label_entry_of(target);
+
+    /* Prefer direct branches when possible. Cross-section branches are always
+     * indirect. */
+    if (target_entry.is_bound_to(veneer.section)) {
+        auto targetOffset = code.label_offset(target);
         directBranch = (a.offset() - targetOffset) <= disp128MB;
+
+#ifdef DEBUG
+        directBranch &= (a.offset() % 512) >= 256;
+#endif
     } else {
         directBranch = false;
     }
-
-#ifdef DEBUG
-    directBranch &= (a.offset() % 512) >= 256;
-#endif
 
     if (ERTS_LIKELY(directBranch)) {
         a.b(target);
@@ -1011,7 +1048,7 @@ void BeamModuleAssembler::flush_last_error() {
      *
      * By adding a nop when we detect this condition, the error will correctly
      * refer to the preceding line. */
-    if (a.offset() == last_error_offset) {
+    if (a.offset() == section->last_error_offset) {
         a.nop();
     }
 }

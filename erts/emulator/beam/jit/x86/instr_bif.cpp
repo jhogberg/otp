@@ -1089,7 +1089,7 @@ void BeamModuleAssembler::emit_call_nif(const ArgWord &Func,
 
     /* `emit_call_nif_yield_helper` relies on this to compute the address of
      * `dispatch` */
-    ASSERT((a.offset() - code.label_offset_from_base(current_label)) ==
+    ASSERT((a.offset() - code.label_offset(current_label)) ==
            BEAM_ASM_NFUNC_SIZE + sizeof(UWord[3]));
 
     a.bind(dispatch);

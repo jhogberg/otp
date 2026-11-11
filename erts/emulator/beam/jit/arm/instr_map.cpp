@@ -393,8 +393,6 @@ void BeamModuleAssembler::emit_i_get_map_elements(
         const ArgSource &Src,
         const ArgWord &Size,
         const Span<const ArgVal> &args) {
-    Label generic = a.new_label(), next = a.new_label();
-
     /* We're not likely to gain much from inlining huge extractions, and the
      * resulting code is quite large, so we'll cut it off after a handful
      * elements.
@@ -410,9 +408,28 @@ void BeamModuleAssembler::emit_i_get_map_elements(
         can_inline &= args[i].isImmed();
     }
 
+    auto generic = [&]() -> void {
+        embed_vararg_rodata(args, ARG5);
+
+        a.mov(ARG3, E);
+
+        emit_enter_runtime<Update::eXRegs>();
+
+        mov_imm(ARG4, args.size() / 3);
+        load_x_reg_array(ARG2);
+        runtime_call<Eterm (*)(Eterm, Eterm *, Eterm *, Uint, Eterm *),
+                     beam_jit_get_map_elements>();
+
+        emit_leave_runtime<Update::eXRegs>();
+
+        a.cbz(ARG1, resolve_beam_label(Fail, disp1MB));
+    };
+
     mov_arg(ARG1, Src);
 
     if (can_inline) {
+        Label next = a.new_label();
+
         comment("simplified multi-element lookup");
 
         emit_untag_ptr(TMP1, ARG1);
@@ -421,7 +438,16 @@ void BeamModuleAssembler::emit_i_get_map_elements(
         a.ldp(TMP2, TMP3, a64::Mem(TMP1, offsetof(flatmap_t, thing_word)));
         a.and_(TMP2, TMP2, imm(_HEADER_MAP_SUBTAG_MASK));
         a.cmp(TMP2, imm(HAMT_SUBTAG_HEAD_FLATMAP));
-        a.b_ne(generic);
+        a.b_ne(resolve_label(cold_fragment([&]() {
+                                 Label fallback = a.new_label();
+                                 a.bind(fallback);
+
+                                 generic();
+                                 a.b(resolve_label(next, disp1MB));
+
+                                 return fallback;
+                             }),
+                             disp1MB));
 
         check_pending_stubs();
 
@@ -461,28 +487,11 @@ void BeamModuleAssembler::emit_i_get_map_elements(
             }
         }
 
-        a.b(next);
+        invalidate_cache();
+        a.bind(next);
+    } else {
+        generic();
     }
-
-    a.bind(generic);
-    {
-        embed_vararg_rodata(args, ARG5);
-
-        a.mov(ARG3, E);
-
-        emit_enter_runtime<Update::eXRegs>();
-
-        mov_imm(ARG4, args.size() / 3);
-        load_x_reg_array(ARG2);
-        runtime_call<Eterm (*)(Eterm, Eterm *, Eterm *, Uint, Eterm *),
-                     beam_jit_get_map_elements>();
-
-        emit_leave_runtime<Update::eXRegs>();
-
-        a.cbz(ARG1, resolve_beam_label(Fail, disp1MB));
-    }
-
-    a.bind(next);
 }
 
 /* ARG1 = map
