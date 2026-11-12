@@ -29,7 +29,7 @@
          term_order/1,gc/1,external_term_format/1,
          messages/1,records_module/1, dist/1,
          gh_11398/1,fail_label/1,lazy_loading/1,
-         save_calls/1]).
+         save_calls/1,on_load/1]).
 
 -record #a{x=1, y=2}.
 -record #b{x=none, y=none, z=none}.
@@ -68,7 +68,8 @@ all() ->
      gh_11398,
      fail_label,
      lazy_loading,
-     save_calls].
+     save_calls,
+     on_load].
 
 groups() ->
     [].
@@ -724,6 +725,47 @@ save_calls(_Config) ->
     end,
 
     30 = process_flag(save_calls, 0),
+
+    ok.
+
+on_load(_Config) ->
+    _ = code:purge(on_load_records),
+    _ = code:delete(on_load_records),
+    _ = code:purge(on_load_records),
+
+    Ref = make_ref(),
+    Self = self(),
+    spawn_link(fun() ->
+                   Self ! {started, Ref},
+                   on_load_records:t(),
+                   Self ! {loaded, Ref},
+                   ok
+               end),
+    receive {started, Ref} -> ok end,
+
+    %% We have to pass a bunch of code barriers, so neither yielding nor
+    %% sending a message from the above process is fully sufficient. We're just
+    %% going to hope that we're done after a second.
+    %%
+    %% The on_load callback in `on_load_records` waits for five seconds.
+    timer:sleep(1000),
+
+    %% The record should not be present yet. Note that we do not use the syntax
+    %% for creating it as that may attempt to load the module, causing us to
+    %% wait until it is.
+    %% 
+    %% We want to hit the window between the module being almost-loaded and
+    %% running its on_load callback, and it finishing loading.
+    try records:get_definition(on_load_records, record) of
+        _ ->
+            ct:fail("Got the definition of a record that should not exist yet")
+    catch
+        error:badarg -> ok
+    end,
+
+    receive {loaded, Ref} -> ok end,
+    Def = {#{is_exported => true},[]},
+    Def = records:get_definition(on_load_records, record),
 
     ok.
 

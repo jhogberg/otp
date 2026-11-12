@@ -910,6 +910,8 @@ BIF_RETTYPE finish_after_on_load_2(BIF_ALIST_2)
             erts_seal_module(&modp->curr);
         }
 
+        erts_record_commit_on_load(BIF_ARG_1);
+
 	mods[0].modp = modp;
 	mods[0].module = BIF_ARG_1;
         mods[0].exception = THE_NON_VALUE;
@@ -935,6 +937,8 @@ BIF_RETTYPE finish_after_on_load_2(BIF_ALIST_2)
 
             ep->trampoline.not_loaded.deferred = 0;
 	}
+
+        erts_record_abort_on_load(BIF_ARG_1);
     }
     erts_release_code_load_permission();
     BIF_RET(am_true);

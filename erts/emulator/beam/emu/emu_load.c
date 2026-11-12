@@ -734,7 +734,13 @@ void beam_load_finalize_code(LoaderState* stp, struct erl_module_instance* inst_
                                              rec.records[i].def_literal);
             entry = erts_record_put(stp->module, rec.records[i].name);
 
-            entry->definitions[staging_ix] = def;
+            if (stp->on_load) {
+                /* Don't make the entry usable yet, keep the old definition
+                 * around until the on_load callback succeeds. */
+                entry->deferred = def;
+            } else {
+                entry->definitions[staging_ix] = def;
+            }
         }
 
         erts_free(ERTS_ALC_T_PREPARED_CODE, rec.records);

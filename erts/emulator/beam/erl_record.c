@@ -68,6 +68,8 @@ record_init(ErtsRecordEntry *obj, const ErtsRecordEntry *tmpl)
     for (int ix = 0; ix < ERTS_NUM_CODE_IX; ix++) {
         obj->definitions[ix] = THE_NON_VALUE;
     }
+
+    obj->deferred = THE_NON_VALUE;
 }
 
 static void
@@ -177,24 +179,64 @@ erts_record_put(Eterm module, Eterm name) {
     return record_staged_upsert(&template);
 }
 
-struct record_module_delete_args {
+struct record_foreach_args {
     Eterm module;
     ErtsCodeIndex code_ix;
 };
 
+static void record_commit_on_load_foreach(ErtsRecordEntry *obj, void *args_)
+{
+    struct record_foreach_args *args = args_;
+
+    if (obj->module == args->module) {
+        obj->definitions[args->code_ix] = obj->deferred;
+        obj->deferred = THE_NON_VALUE;
+    }
+}
+
+void erts_record_commit_on_load(Eterm module)
+{
+    ErtsCodeIndex staging_ix = erts_staging_code_ix();
+    struct record_foreach_args args = {module, staging_ix};
+
+    ERTS_LC_ASSERT(erts_has_code_stage_permission());
+
+    record_staged_foreach(record_commit_on_load_foreach, &args, staging_ix);
+}
+
+static void record_abort_on_load_foreach(ErtsRecordEntry *obj, void *args_)
+{
+    struct record_foreach_args *args = args_;
+
+    if (obj->module == args->module) {
+        obj->deferred = THE_NON_VALUE;
+    }
+}
+
+void erts_record_abort_on_load(Eterm module)
+{
+    ErtsCodeIndex staging_ix = erts_staging_code_ix();
+    struct record_foreach_args args = {module, staging_ix};
+
+    ERTS_LC_ASSERT(erts_has_code_stage_permission());
+
+    record_staged_foreach(record_abort_on_load_foreach, &args, staging_ix);
+}
+
 static void record_module_delete_foreach(ErtsRecordEntry *obj, void *args_)
 {
-    struct record_module_delete_args *args = args_;
+    struct record_foreach_args *args = args_;
 
     if (obj->module == args->module) {
         obj->definitions[args->code_ix] = THE_NON_VALUE;
+        obj->deferred = THE_NON_VALUE;
     }
 }
 
 void erts_record_module_delete(Eterm module)
 {
     ErtsCodeIndex staging_ix = erts_staging_code_ix();
-    struct record_module_delete_args args = {module, staging_ix};
+    struct record_foreach_args args = {module, staging_ix};
 
     ERTS_LC_ASSERT(erts_has_code_stage_permission());
 

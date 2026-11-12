@@ -36,6 +36,10 @@ typedef struct {
      * pointer to the canonical ErtsRecordDefinition for each code
      * generation, while the tail holds the default values. */
     Eterm definitions[ERTS_ADDRESSV_SIZE];
+
+    /* A deferred literal CONS pointer for `on_load`, used similarly
+     * to the same field in Export entries. */
+    Eterm deferred;
 } ErtsRecordEntry;
 
 /* Native record definitions are tagged as tuples to simplify the
@@ -112,6 +116,9 @@ Eterm erl_get_record_field(Process* p, Eterm src, Eterm id, Eterm field);
 
 bool erl_get_record_elements(Process* P, Eterm* reg, Eterm src,
                              Uint size, const Eterm* new_p);
+
+void erts_record_commit_on_load(Eterm module);
+void erts_record_abort_on_load(Eterm module);
 
 void erts_record_start_staging(void);
 void erts_record_end_staging(int commit);

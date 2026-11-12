@@ -148,7 +148,9 @@ MODULES= \
 	crypto_reference \
 	literal_area_collector_test \
         erts_test_sync_tracer \
-        ext_records
+        ext_records \
+        on_load_records
+
 
 NO_OPT= bs_bincomp \
 	bs_bit_binaries \
